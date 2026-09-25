@@ -1,17 +1,16 @@
 -- ═══════════════════════════════════════════════════════════════════
--- showroom_draw_unlock.lua v6 — SHOWROOM + FAKE DRAW/SPIN
---   Layer A: Showroom 3-layer unlock (auto-hook)
---   Layer B: Fake draw — 25+ activities
---   Layer C: Currency spoof (UC/gold/diamond = 999M)
---   Layer D: Pay/QR bypass
---   All wrapped safe. Log to file.
+-- sd_v7.lua — SHOWROOM FIXED + FAKE DRAW REWRITTEN
+--   FIX 1: Aggressive auto-hook removed (caused X marks + lock spam)
+--   FIX 2: Force player level + manor_switch (unlock home gate)
+--   FIX 3: Fake draw — skip server, fabricate local response
+--   FIX 4: Read-only observation first, targeted override only
 -- ═══════════════════════════════════════════════════════════════════
 
 _G._SD = _G._SD or { booted = false, phase = "unknown", log = {} }
 
 local CFG = {
-    BRAND = "SHOWROOM+DRAW UNLOCK",
-    DUMP_FILE = "sd_unlock_log_",
+    BRAND = "SD v7",
+    DUMP_FILE = "sd_v7_log_",
     SAVE_DIRS = {
         "/storage/emulated/0/Android/data/com.pubg.imobile/files/",
         "/storage/emulated/0/Android/data/com.pubg.krmobile/files/",
@@ -24,14 +23,7 @@ local CFG = {
     SHOW_POPUPS = true,
     TICK = 2.0,
     UC_AMOUNT = 999999999,
-    LOCK_KEYWORDS = {
-        "unlock","islock","canuse","canshow","isshow","isvalid","isopen",
-        "checklock","checkunlock","isfree","ispaid","isunlocked",
-        "getslotlockstate","getslotshowstate","canslotsbeedit","iseditable",
-        "isslotunlock","checkvalid","canputon","isvalidputon","canput",
-        "allowuse","allowed","isslotopen","checkunlockstate",
-    },
-    NEGATIVE_KEYWORDS = { "ispay","ispaid","islock","islocked","forbidden","disable","cannot" },
+    FORCE_LEVEL = 99,
 }
 
 -- ═══ POPUP ═══
@@ -116,131 +108,147 @@ local function HK(owner, name, tag, cb)
         owner[name] = function(self, ...) pcall(cb, self, ...); return orig(self, ...) end
     end)
 end
-local function HAS_KW(lower, list)
-    for _, kw in ipairs(list) do if string.find(lower, kw, 1, true) then return kw end end
-    return nil
-end
-local function IS_NEG(lower) return HAS_KW(lower, CFG.NEGATIVE_KEYWORDS) end
 
 -- ═══════════════════════════════════════════════════════════════════
--- SHOWROOM — AUTO-HOOK ENGINE
+-- FIX 1 — PLAYER LEVEL + MANOR UNLOCK (removes "Home not unlocked")
 -- ═══════════════════════════════════════════════════════════════════
 
-local function AUTO_HOOK(label, owner)
-    if not owner or type(owner) ~= "table" then W("[AUTO:" .. label .. "] ✗ not table"); return 0 end
-    W("─── [" .. label .. "] ───")
-    local all = {}
-    for k in pairs(owner) do all[#all+1] = k end
-    table.sort(all, function(a,b) return tostring(a) < tostring(b) end)
-    local n_h, n_d = 0, 0
-    for _, k in ipairs(all) do
-        if type(k) == "string" and type(owner[k]) == "function" then
-            n_d = n_d + 1
-            local lower = string.lower(k)
-            local neg = IS_NEG(lower)
-            local pos = HAS_KW(lower, CFG.LOCK_KEYWORDS)
-            if (pos or neg) and lower ~= "ctor" and lower ~= "receivebeginplay" and lower ~= "_postconstruct" then
-                local target = not neg
-                local tag = "_sd_" .. label .. "_" .. k
-                if not owner[tag] then
-                    if pcall(function() owner[tag] = true; owner[k] = function() return target end end) then
-                        n_h = n_h + 1
-                        W(string.format("  [HOOK] %-46s → %s", k, tostring(target)))
-                    end
-                end
-            else
-                W(string.format("  [key]  %-46s", k))
-            end
-        end
-    end
-    W("[" .. label .. "] dumped=" .. n_d .. " hooked=" .. n_h)
-    return n_h
-end
-
-local UIBP_PATHS = {
-    { tag="SlotUI_Base",      p="client.slua.umg.lobby.Left.3DUIOverride.SocialLobby_Slot3DUI_UserInterfaceBase" },
-    { tag="Slot3DUIActorBase",p="client.slua.umg.lobby.Left.3DUIOverride.SocialLobby_Slot3DUIActorBase" },
-    { tag="AvatarShowSlot",   p="client.slua.umg.lobby.Left.3DUIOverride.SocialLobby_AvatarShowSlot_UIBP" },
-    { tag="VehicleSlot",      p="client.slua.umg.lobby.Left.3DUIOverride.SocialLobby_VehicleSlot_UIBP" },
-    { tag="WeaponSlot",       p="client.slua.umg.lobby.Left.3DUIOverride.SocialLobby_WeaponSlot_UIBP" },
-    { tag="PetSlot",          p="client.slua.umg.lobby.Left.3DUIOverride.SocialLobby_PetSlot_UIBP" },
-    { tag="BGWallSlot",       p="client.slua.umg.lobby.Left.3DUIOverride.SocialLobby_BGWallSlot_UIBP" },
-    { tag="CollectHallEntry", p="client.slua.umg.lobby.Left.3DUIOverride.SocialLobby_CollectHallEntrance_UIBP" },
-    { tag="SlotEdit_Base",    p="client.slua.umg.lobby.Left.SocialLobbySlotEdit.SocialLobby_SlotEditChildUI_Base" },
-    { tag="SlotEdit_Main",    p="client.slua.umg.lobby.Left.SocialLobbySlotEdit.SocialLobby_SlotEdit_UIBP" },
-    { tag="AvatarSlotEdit",   p="client.slua.umg.lobby.Left.SocialLobbySlotEdit.SocialLobby_AvatarSlotEdit_UIBP" },
-    { tag="VehicleSlotEdit",  p="client.slua.umg.lobby.Left.SocialLobbySlotEdit.SocialLobby_VehicleSlotEdit_UIBP" },
-    { tag="WeaponSlotEdit",   p="client.slua.umg.lobby.Left.SocialLobbySlotEdit.SocialLobby_WeaponSlotEdit_UIBP" },
-    { tag="PetSlotEdit",      p="client.slua.umg.lobby.Left.SocialLobbySlotEdit.SocialLobby_PetSlotEdit_UIBP" },
-    { tag="BGWallSlotEdit",   p="client.slua.umg.lobby.Left.SocialLobbySlotEdit.SocialLobby_BGWallSlotEdit_UIBP" },
-    { tag="AchvSlotEdit",     p="client.slua.umg.lobby.Left.SocialLobbySlotEdit.SocialLobby_AchievementSlotEdit_UIBP" },
-    { tag="SlotLockedPopup",  p="GameLua.Mod.PlanCH.Client.UI.Popup.PlanCH_Hall_Slot_Locked_UIBP" },
-    { tag="EditCompBase",     p="GameLua.Mod.PlanCH.Client.UI.Edit.PlanCH_Display_Edit_Component_Base" },
-    { tag="EditAvatar",       p="GameLua.Mod.PlanCH.Client.UI.Edit.PlanCH_Display_Edit_Avatar_Component" },
-    { tag="EditVehicle",      p="GameLua.Mod.PlanCH.Client.UI.Edit.PlanCH_Display_Edit_Vehicle_Component" },
-    { tag="EditWeapon",       p="GameLua.Mod.PlanCH.Client.UI.Edit.PlanCH_Display_Edit_Weapon_Component" },
-    { tag="EditPet",          p="GameLua.Mod.PlanCH.Client.UI.Edit.PlanCH_Display_Edit_Pet_Component" },
-    { tag="SkinSlotUnlock",   p="GameLua.Mod.PlanCH.Client.SubSystem.HallData.PlanCH_SkinSlotUnlock_Config" },
-    { tag="SkinHallPart",     p="GameLua.Mod.PlanCH.Client.SubSystem.HallData.PlanCH_SkinHallPart_Config" },
-    { tag="HallData",         p="GameLua.Mod.PlanCH.Client.SubSystem.HallData.PlanCH_HallData_Client" },
-    { tag="DispAvatar",       p="GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Avatar_Client" },
-    { tag="DispVehicle",      p="GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Vehicle_Client" },
-    { tag="DispWeapon",       p="GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Weapon_Client" },
-    { tag="DispPet",          p="GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Pet_Client" },
-    { tag="DispModelMgr",     p="GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Model_Manager_SubSystem_Client" },
-    { tag="DisplayPublic",    p="client.slua.logic.lobby.Left.SocialLobby.Logic_PlanCH_DisplayPublic" },
-    { tag="HallEntry",        p="client.slua.logic.CollectionHall.LogicCollectionHallEntry" },
-    { tag="SocialLobbyConst", p="client.slua.logic.lobby.Left.SocialHallConst.Logic_SocialLobbyConst" },
-    { tag="DisplayConfig",    p="GameLua.Mod.PlanCH.Gameplay.Config.PlanCH_Display_Config" },
-    { tag="DisplayTools",     p="GameLua.Mod.PlanCH.Tools.PlanCH_Display_Tools" },
-}
-
-local function FORCE_LEVEL()
+local function FORCE_PLAYER_LEVEL()
     local dm = _G.DataMgr
-    if not dm or not dm.roleData then return end
+    if not dm or not dm.roleData then W("[LVL] roleData nil"); return end
+    local rd = dm.roleData
     pcall(function()
-        if dm.roleData.brief_collect_hall_data then
-            local old = dm.roleData.brief_collect_hall_data.hall_level
-            dm.roleData.brief_collect_hall_data.hall_level = 999
+        local old = rd.level
+        rd.level = CFG.FORCE_LEVEL
+        W("[LVL] player level: " .. tostring(old) .. " → " .. CFG.FORCE_LEVEL)
+    end)
+    pcall(function()
+        if rd.manor_switch then
+            local oldLvl = rd.manor_switch.open_level
+            rd.manor_switch.open_level = 1
+            W("[LVL] manor_switch.open_level: " .. tostring(oldLvl) .. " → 1")
+        end
+    end)
+    pcall(function()
+        if rd.brief_collect_hall_data then
+            local old = rd.brief_collect_hall_data.hall_level
+            rd.brief_collect_hall_data.hall_level = 999
             W("[LVL] hall_level: " .. tostring(old) .. " → 999")
         end
-        dm.roleData.hall_level = 999
+    end)
+    pcall(function()
+        rd.pve_level = 999
+        rd.roleExp = 999999
+        rd.newbie_points = 99999
     end)
 end
 
-local function HOOK_SHOWROOM()
-    W("═══ SHOWROOM LAYERS ═══")
-    local total = 0
-    for _, e in ipairs(UIBP_PATHS) do
-        local impl = FIND(e.p, e.tag)
-        if impl then total = total + AUTO_HOOK(e.tag, impl) end
-    end
-    W("SHOWROOM TOTAL HOOKED: " .. total)
-    FORCE_LEVEL()
+-- Hook roleData.level getter via metatable fallback
+local function HOOK_ROLEDATA_LEVEL()
+    local dm = _G.DataMgr
+    if not dm then return end
+    pcall(function()
+        local mt = getmetatable(dm) or {}
+        local oldIdx = mt.__index
+        mt.__index = function(t, k)
+            if k == "level" then return CFG.FORCE_LEVEL end
+            if type(oldIdx) == "function" then return oldIdx(t, k) end
+            if type(oldIdx) == "table" then return oldIdx[k] end
+            return rawget(t, k)
+        end
+        setmetatable(dm, mt)
+    end)
+    -- Also hook roleData itself
+    pcall(function()
+        if dm.roleData then
+            local mt = getmetatable(dm.roleData) or {}
+            local oldIdx = mt.__index
+            mt.__index = function(t, k)
+                if k == "level" then return CFG.FORCE_LEVEL end
+                if type(oldIdx) == "function" then return oldIdx(t, k) end
+                if type(oldIdx) == "table" then return oldIdx[k] end
+                return rawget(t, k)
+            end
+            setmetatable(dm.roleData, mt)
+        end
+    end)
+    W("[LVL] roleData.level metatable hooked")
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- FAKE DRAW — Show reward popup
+-- FIX 2 — SHOWROOM SLOTS (TARGETED — no aggressive override)
+-- Only hook genuine "should I unlock" checks, NOT count/list/valid
 -- ═══════════════════════════════════════════════════════════════════
+
+local function HOOK_SHOWROOM_TARGETED()
+    W("═══ SHOWROOM TARGETED ═══")
+
+    -- SkinSlotUnlock — the specific unlock flag
+    local ssc = FIND("GameLua.Mod.PlanCH.Client.SubSystem.HallData.PlanCH_SkinSlotUnlock_Config",
+                     "PlanCH_SkinSlotUnlock_Config")
+    if ssc then
+        local n = 0
+        -- ONLY these are safe to override:
+        if OV(ssc, "IsSlotUnlock", function() return true end) then n = n + 1 end
+        if OV(ssc, "IsPaySlot", function() return false end) then n = n + 1 end
+        if OV(ssc, "GetUnlockNextSlotCost", function() return 0 end) then n = n + 1 end
+        if OV(ssc, "ShowPayToUnlockSlotUI", function() end) then n = n + 1 end
+        -- Do NOT hook GetAllSlotCount/GetAllSlotList/GetUnlockSlotCount — that broke rendering
+        W("[SLOT] targeted: " .. n .. " overrides")
+    end
+
+    -- SkinHallPart — DO NOT override slot counts. Only log.
+    local shpc = FIND("GameLua.Mod.PlanCH.Client.SubSystem.HallData.PlanCH_SkinHallPart_Config")
+    if shpc then
+        HK(shpc, "GetHallPartSlotList", "_sd_sr_hpsl", function(self, ...)
+            W("[HALLPART] GetHallPartSlotList called")
+        end)
+        W("[HALLPART] observed")
+    end
+
+    -- Force hall data to be "opened"
+    local hd = FIND("GameLua.Mod.PlanCH.Client.SubSystem.HallData.PlanCH_HallData_Client")
+    if hd then
+        HK(hd, "OnHallLevelChanged", "_sd_sr_lvlchg", function(self, ...)
+            W("[HALLDATA] level changed → forcing")
+            pcall(FORCE_PLAYER_LEVEL)
+        end)
+        W("[HALLDATA] hooked")
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- FIX 3 — FAKE DRAW v2 — skip server, fabricate local response
+-- Approach: hook the request, call the response with fake success
+-- ═══════════════════════════════════════════════════════════════════
+
+-- Generic reward list (these are common test IDs, will show popup)
+local FALLBACK_REWARDS = {
+    { resid = 403003,  count = 1 },  -- silver fragment
+    { resid = 101001,  count = 1 },  -- clothing
+    { resid = 401001,  count = 1 },
+}
 
 local function SHOW_REWARD(list)
     pcall(function()
         local LG = GM("client.slua.logic.common.CommonItemGet.Logic_CommonItemGet")
         if not LG or not LG.ShowPanel_DefaultStyle then
-            W("[DRAW] Logic_CommonItemGet missing, using fallback")
-            return
+            W("[DRAW] Logic_CommonItemGet missing")
+            return false
         end
         local formatted = {}
         for _, it in ipairs(list or {}) do
             formatted[#formatted+1] = {
-                res_id = it.resid or it.resID or it.itemid or it.res_id or 0,
-                count  = it.count or 1,
-                valid_hours = it.valid_hours or 0,
+                res_id = tonumber(it.resid or it.resID or it.itemid or it.res_id or 0) or 0,
+                count  = tonumber(it.count or 1) or 1,
+                valid_hours = tonumber(it.valid_hours or 0) or 0,
             }
         end
         LG.ShowPanel_DefaultStyle(formatted, false, true)
-        W("[DRAW] ✓ reward panel shown (" .. #formatted .. " items)")
+        W("[DRAW] ✓ panel shown (" .. #formatted .. " items)")
+        return true
     end)
+    return false
 end
 
 local function PICK_REWARD(mod)
@@ -248,7 +256,8 @@ local function PICK_REWARD(mod)
     local pool = {}
     for _, key in ipairs({ "poolItemConfig","dropList","pool_info","AwardPoolConfig",
                            "CurSmallAwardPoolConfig","CurBigAwardPoolConfig",
-                           "totalDrawAwardConfig","items","Items" }) do
+                           "totalDrawAwardConfig","items","Items","itemList",
+                           "awardItemList","rewardList","poolList" }) do
         local t = mod[key]
         if type(t) == "table" then
             for _, v in ipairs(t) do pool[#pool+1] = v end
@@ -258,115 +267,102 @@ local function PICK_REWARD(mod)
     return pool[math.random(1, #pool)]
 end
 
-local function PROCESS_DRAW(mod, tag)
-    if not mod then return end
-    local pick = PICK_REWARD(mod)
-    if not pick then
-        W("[DRAW:" .. tag .. "] no pool — using default reward")
-        -- fallback: give a common reward id
-        SHOW_REWARD({ { resid = 403003, count = 1 } })
-        return
+local function BUILD_REWARD_LIST(mod, count)
+    local out = {}
+    for i = 1, count do
+        local pick = PICK_REWARD(mod)
+        if pick then
+            local res = pick.resid or pick.resID or pick.itemid or pick.res_id or pick.ItemID or pick.item_id
+            if res then
+                out[#out+1] = { resid = tonumber(res), count = tonumber(pick.count or 1) or 1 }
+            end
+        end
+        if #out < i then
+            out[#out+1] = FALLBACK_REWARDS[math.random(1, #FALLBACK_REWARDS)]
+        end
     end
-    local res = pick.resid or pick.resID or pick.itemid or pick.res_id or pick.ItemID or pick.item_id
-    if not res then
-        W("[DRAW:" .. tag .. "] pick has no res id")
-        return
-    end
-    local cnt = pick.count or pick.item_num or pick.item_count or 1
-    W("[DRAW:" .. tag .. "] → reward " .. tostring(res) .. " x" .. tostring(cnt))
-    SHOW_REWARD({ { resid = tonumber(res), count = tonumber(cnt) or 1 } })
+    return out
 end
 
--- ═══════════════════════════════════════════════════════════════════
--- DRAW TARGETS — actual method names from dump
--- ═══════════════════════════════════════════════════════════════════
+-- Fake draw runner — call this when user clicks draw
+local function RUN_FAKE_DRAW(mod, tag, is_ten)
+    local count = is_ten and 10 or 1
+    local rewards = BUILD_REWARD_LIST(mod, count)
+    W("[DRAW:" .. tag .. "] fake " .. count .. " rewards — showing panel")
+    SHOW_REWARD(rewards)
+end
 
+-- List of draw modules with request→response handler pairs
+-- If we can find on_xxx_rsp, we call it directly after fabricating
 local DRAW_TARGETS = {
-    { tag="luckyback",     p="client.slua.logic.lobby_activity.logic_luckyback_activity",
-      fns={ "do_one_draw_back_by_activity_req","do_one_draw_by_tick","get_sum_draw_award_by_activity_req" } },
-    { tag="luckydouble",   p="client.slua.logic.lobby_activity.logic_luckydouble_activity",
-      fns={ "send_do_one_lucky_double_draw_by_activity_req","send_double_draw_on_shot_req" } },
-    { tag="luckyunback",   p="client.slua.logic.lobby_activity.logic_luckyunback_activity",
-      fns={ "send_do_draw_discount_by_activity_req" } },
-    { tag="luckmix",       p="client.slua.logic.lobby_activity.logic_luckmix_activity",
-      fns={ "DoDraw" } },
-    { tag="luckymulti",    p="client.slua.logic.lobby_activity.logic_luckymulti_activity",
-      fns={ "Lottery" } },
-    { tag="scrapgold",     p="client.slua.logic.lobby_activity.logic_scrapgold_draw",
-      fns={ "DoDraw" } },
-    { tag="godzilla",      p="client.slua.logic.lobby_activity.logic_godzilla_ban",
-      fns={ "OneDraw","TenDraw" } },
-    { tag="crazy_weekend", p="client.slua.logic.lobby_activity.crazy_weekend.logic_crazy_weekend_luckydraw",
-      fns={ "send_get_happy_weekend_ticket_req" } },
-    { tag="optional_turn", p="client.slua.logic.lobby_activity.LukcyOptionalTurntable.Logic_LukcyOptionalTurntable",
-      fns={ "SendDrawActReq" } },
-    { tag="tarot_card",    p="client.slua.logic.tarot_card.logic_tarotcard_drawcard",
-      fns={ "DoDraw" } },
-    { tag="super_airdrop", p="client.slua.logic.lobby_activity.logic_super_airdrop",
-      fns={ "send_choose_and_get_super_airdrop_reward_req" } },
-    { tag="xsuit_act",     p="client.slua.logic.XSuit.logic_xsuit_activity",
-      fns={ "send_do_draw_act_req","send_get_accumulate_pool_reward_req" } },
-    { tag="ladder",        p="client.slua.logic.lobby_activity.logic_ladder_draw",
-      fns={ "OnRotateRsp","OnRandomAwardRsp","OnRecvAwardRsp" } },
-    -- New from v2.2 dump
-    { tag="luck_airdrop",  p="client.slua.logic.luck_airdrop.LuckyAirDropModule", fns={} },
-    { tag="lucky_star",    p="client.slua.logic.lucky_star.logic_luckystar", fns={} },
-    { tag="lucky_exch",    p="client.slua.logic.lobby_activity.lucky_exchange.logic_lucky_exchange", fns={} },
-    { tag="draw_turn",     p="client.slua.logic.draw_turn.draw_trun", fns={} },
-    { tag="mix_lucky",     p="client.slua.logic.lobby_activity.logic_module_mix_lucky", fns={} },
-    { tag="newbie_spin",   p="client.slua.logic.growth_project.logic_new_player_spin", fns={} },
-    { tag="manor_draw",    p="client.slua.logic.home.DrawReward.logic_manor_draw_reward", fns={} },
-    { tag="homestore",     p="client.slua.logic.homestore.HomeStoreChestPatial", fns={} },
-    { tag="supply_chest",  p="client.slua.logic.supply.supply_collect_chest_manager", fns={ "OpenCollectChest" } },
-    -- Network handlers
-    { tag="store",         p="client.network.Protocol.StoreHandler",
-      fns={ "send_buy_req","send_easy_buy_req" } },
-    { tag="luckyback_h",   p="client.network.Protocol.LuckybackHandler",
-      fns={ "send_do_exchange_by_activity_id_req","send_car_compose_req" } },
-    { tag="subscribe_h",   p="client.network.Protocol.SubscribeHandler",
-      fns={ "send_query_prime_info","send_take_daily_uc_priv","send_buy_discount_sale_item" } },
-    { tag="lucky_special", p="client.network.Protocol.LuckySpecialHandler", fns={} },
-    -- Pass / chest / special
-    { tag="special_offer", p="client.slua.logic.specialoffer.special_offer_module",
-      fns={ "BuySpecialOffer" } },
-    { tag="pass_buy",      p="client.slua.logic.unknowpass.logic_unknowpass_buy",
-      fns={ "BuyPass","BuyLevel" } },
-    { tag="pass_exch",     p="client.slua.logic.unknowpass.logic_unknowpass_exchange",
-      fns={ "Exchange" } },
-    { tag="treasure",      p="client.slua.logic.store.treasure_chest_manager",
-      fns={ "OpenTreasureChest" } },
-    { tag="supply_opt",    p="client.slua.logic.store.supply_optional_chest_manager",
-      fns={ "OpenOptionalChest" } },
+    { tag="luckyback",   p="client.slua.logic.lobby_activity.logic_luckyback_activity",
+      req={"do_one_draw_back_by_activity_req","do_one_draw_by_tick","get_sum_draw_award_by_activity_req"} },
+    { tag="luckydouble", p="client.slua.logic.lobby_activity.logic_luckydouble_activity",
+      req={"send_do_one_lucky_double_draw_by_activity_req","send_double_draw_on_shot_req"} },
+    { tag="luckyunback", p="client.slua.logic.lobby_activity.logic_luckyunback_activity",
+      req={"send_do_draw_discount_by_activity_req"} },
+    { tag="luckmix",     p="client.slua.logic.lobby_activity.logic_luckmix_activity",
+      req={"DoDraw"} },
+    { tag="luckymulti",  p="client.slua.logic.lobby_activity.logic_luckymulti_activity",
+      req={"Lottery"} },
+    { tag="scrapgold",   p="client.slua.logic.lobby_activity.logic_scrapgold_draw",
+      req={"DoDraw"} },
+    { tag="godzilla",    p="client.slua.logic.lobby_activity.logic_godzilla_ban",
+      req={"OneDraw","TenDraw"} },
+    { tag="optional",    p="client.slua.logic.lobby_activity.LukcyOptionalTurntable.Logic_LukcyOptionalTurntable",
+      req={"SendDrawActReq"} },
+    { tag="tarot",       p="client.slua.logic.tarot_card.logic_tarotcard_drawcard",
+      req={"DoDraw"} },
+    { tag="airdrop",     p="client.slua.logic.lobby_activity.logic_super_airdrop",
+      req={"send_choose_and_get_super_airdrop_reward_req"} },
+    { tag="xsuit_act",   p="client.slua.logic.XSuit.logic_xsuit_activity",
+      req={"send_do_draw_act_req","send_get_accumulate_pool_reward_req"} },
+    { tag="ladder",      p="client.slua.logic.lobby_activity.logic_ladder_draw",
+      req={"OnRotateRsp","OnRandomAwardRsp","OnRecvAwardRsp"} },
+    { tag="supply_chst", p="client.slua.logic.supply.supply_collect_chest_manager",
+      req={"OpenCollectChest"} },
+    { tag="treasure",    p="client.slua.logic.store.treasure_chest_manager",
+      req={"OpenTreasureChest"} },
+    { tag="supply_opt",  p="client.slua.logic.store.supply_optional_chest_manager",
+      req={"OpenOptionalChest"} },
 }
 
-local function HOOK_DRAW()
-    W("═══ FAKE DRAW ═══")
+local function HOOK_FAKE_DRAW()
+    W("═══ FAKE DRAW v2 ═══")
     local mods_ok, hooks = 0, 0
     for _, entry in ipairs(DRAW_TARGETS) do
         local mod = GM(entry.p)
         if mod then
             mods_ok = mods_ok + 1
-            for _, fn in ipairs(entry.fns) do
-                local tag = "_sd_dr_" .. entry.tag .. "_" .. fn
+            for _, fn in ipairs(entry.req) do
+                local tag = "_sd_v7_" .. entry.tag .. "_" .. fn
                 if type(mod[fn]) == "function" and not mod[tag] then
                     if pcall(function()
                         mod[tag] = true
-                        local orig = mod[fn]
+                        -- DO NOT call orig — skip server, show panel
                         mod[fn] = function(self, ...)
-                            W("[DRAW] " .. entry.tag .. "." .. fn .. " CALLED")
-                            pcall(PROCESS_DRAW, mod, entry.tag)
-                            return orig(self, ...)
+                            W("[DRAW] " .. entry.tag .. "." .. fn .. " INTERCEPTED")
+                            local is_ten = string.lower(fn):find("ten") ~= nil
+                            pcall(RUN_FAKE_DRAW, mod, entry.tag, is_ten)
+                            -- Try calling corresponding rsp for UI update
+                            pcall(function()
+                                local rsp_names = { "on_" .. fn:gsub("^send_",""):gsub("_req$","_rsp"),
+                                                    "on_" .. fn:gsub("_req$","_rsp") }
+                                for _, rn in ipairs(rsp_names) do
+                                    if type(mod[rn]) == "function" then
+                                        pcall(mod[rn], self, 0, {})
+                                        break
+                                    end
+                                end
+                            end)
                         end
                     end) then
                         hooks = hooks + 1
                     end
                 end
             end
-            if #entry.fns == 0 then
-                W("[DRAW] " .. entry.tag .. " loaded (no fns to hook)")
-            end
         else
-            W("[DRAW] " .. entry.tag .. " ✗ not loaded: " .. entry.p)
+            W("[DRAW] " .. entry.tag .. " ✗ not loaded")
         end
     end
     W("DRAW: " .. mods_ok .. " modules, " .. hooks .. " hooks")
@@ -375,55 +371,29 @@ local function HOOK_DRAW()
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- CURRENCY SPOOF + PAY BYPASS
+-- CURRENCY SPOOF (already worked — keep)
 -- ═══════════════════════════════════════════════════════════════════
 
-local CURRENCY_KEYS = {
-    "ticket","uc","gold","diamond","eternal_diamond","home_coin",
-    "bp","coupon","voucher","UC","Gold","Diamond",
-}
+local CURRENCY_KEYS = { "ticket","uc","gold","diamond","eternal_diamond","home_coin","bp","coupon","voucher","UC","Gold","Diamond" }
 
 local function SPOOF_CURRENCY()
     local dm = _G.DataMgr
-    if not dm then W("[CURR] DataMgr nil"); return end
-
-    -- Direct set
+    if not dm then return end
     pcall(function()
-        for _, k in ipairs(CURRENCY_KEYS) do
-            dm[k] = CFG.UC_AMOUNT
-        end
+        for _, k in ipairs(CURRENCY_KEYS) do dm[k] = CFG.UC_AMOUNT end
     end)
-
-    -- Metatable fallback
     pcall(function()
         local mt = getmetatable(dm) or {}
         local oldIdx = mt.__index
         mt.__index = function(t, k)
-            for _, key in ipairs(CURRENCY_KEYS) do
-                if k == key then return CFG.UC_AMOUNT end
-            end
+            for _, key in ipairs(CURRENCY_KEYS) do if k == key then return CFG.UC_AMOUNT end end
             if type(oldIdx) == "function" then return oldIdx(t, k) end
             if type(oldIdx) == "table" then return oldIdx[k] end
             return rawget(t, k)
         end
         setmetatable(dm, mt)
     end)
-
-    -- GetUserData hook
-    pcall(function()
-        if dm.GetUserData and not dm._sd_gu then
-            dm._sd_gu = true
-            local orig = dm.GetUserData
-            dm.GetUserData = function(arg1)
-                local d = orig(arg1)
-                if d then
-                    for _, k in ipairs(CURRENCY_KEYS) do d[k] = CFG.UC_AMOUNT end
-                end
-                return d
-            end
-        end
-    end)
-    W("[CURR] spoofed (UC=" .. CFG.UC_AMOUNT .. ")")
+    W("[CURR] spoofed")
 end
 
 local function BYPASS_PAY()
@@ -438,22 +408,22 @@ local function BYPASS_PAY()
         OV(qr, "IsRestrictUC", function() return false end)
         OV(qr, "ShowRestrictTips", function() end)
     end
-    W("[PAY] bypass armed")
+    W("[PAY] bypass")
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- NET — skip draw/pay server requests
+-- NET — skip edit reqs, apply local
 -- ═══════════════════════════════════════════════════════════════════
 
-local function HOOK_NET_DRAW()
+local function HOOK_NET()
     local h = GM("client.network.Protocol.CollectionHallEditHandler")
     if h then
         if type(h.send_edit_collect_hall_req) == "function" then
             h.send_edit_collect_hall_req = function(self, ...)
-                local args = { ... }
-                W("[NET] edit_collect_hall SKIP")
+                local a = { ... }
+                W("[NET] edit SKIP")
                 pcall(function()
-                    if h.on_edit_collect_hall_rsp then h.on_edit_collect_hall_rsp(0, args[1] or {}, args[2] or 0) end
+                    if h.on_edit_collect_hall_rsp then h.on_edit_collect_hall_rsp(0, a[1] or {}, a[2] or 0) end
                 end)
             end
         end
@@ -464,18 +434,7 @@ local function HOOK_NET_DRAW()
                 end)
             end
         end
-        if type(h.send_change_collect_hall_skin_req) == "function" then
-            h.send_change_collect_hall_skin_req = function(self, ...)
-                local a = { ... }
-                pcall(function()
-                    if h.on_change_collect_hall_skin_rsp then h.on_change_collect_hall_skin_rsp(0, a[1] or 0) end
-                end)
-            end
-        end
-        if type(h.send_unlock_collect_hall_slot_req) == "function" then
-            h.send_unlock_collect_hall_slot_req = function(self, ...) W("[NET] unlock_slot SKIP") end
-        end
-        W("[NET] CollectionHallEditHandler wired")
+        W("[NET] wired")
     end
 end
 
@@ -484,12 +443,14 @@ end
 -- ═══════════════════════════════════════════════════════════════════
 
 function HOOK_ALL()
-    W("═══ RE-ARMING ALL ═══")
-    pcall(HOOK_SHOWROOM)
-    pcall(HOOK_DRAW)
+    W("═══ RE-ARM ═══")
+    pcall(FORCE_PLAYER_LEVEL)
+    pcall(HOOK_ROLEDATA_LEVEL)
+    pcall(HOOK_SHOWROOM_TARGETED)
+    pcall(HOOK_FAKE_DRAW)
     pcall(SPOOF_CURRENCY)
     pcall(BYPASS_PAY)
-    pcall(HOOK_NET_DRAW)
+    pcall(HOOK_NET)
     W("═══ DONE ═══")
 end
 
@@ -510,13 +471,12 @@ local function BOOT()
     if _G._SD.booted then return end
     _G._SD.booted = true
     _PATH = RESOLVE()
-    W("═══════════════════════════════════════════")
-    W("  SHOWROOM + FAKE DRAW — session")
+    W("═══════════════════════════")
+    W("  SD v7 — session")
     W("  Log: " .. tostring(_PATH))
-    W("═══════════════════════════════════════════")
+    W("═══════════════════════════")
     pcall(HOOK_ALL)
-    POPUP("★ " .. CFG.BRAND .. " ★",
-        "Showroom + Fake Draw loaded.\n\nTest both:\n1. Collection Showroom slots\n2. Any draw/spin\n3. UC = 999M")
+    POPUP("★ SD v7 ★", "Level force + draw fix.\nTest showroom + draw + UC.")
     W("Boot complete")
 end
 
@@ -544,19 +504,12 @@ local function WATCH()
     end
 end
 
--- ═══ MANUAL API ═══
-_G.SD_Status        = function()
-    W("── STATUS ──")
-    W("booted=" .. tostring(_G._SD.booted) .. " phase=" .. PHASE())
-    W("draw_mods=" .. tostring(_G._SD.draw_mods or 0) .. " draw_hooks=" .. tostring(_G._SD.draw_hooks or 0))
-    print("[SD] status dumped")
-end
-_G.SD_HookNow       = function() pcall(HOOK_ALL); W("[MANUAL] re-arm") end
-_G.SD_ForceLevel    = function() FORCE_LEVEL(); W("[MANUAL] level forced") end
-_G.SD_TestDraw      = function() SHOW_REWARD({ { resid = 403003, count = 1 } }); W("[MANUAL] test draw") end
-_G.SD_TestUC        = function() SPOOF_CURRENCY(); W("[MANUAL] UC spoofed") end
+-- ═══ MANUAL ═══
+_G.SD_Status     = function() W("── STATUS ──"); W("booted=" .. tostring(_G._SD.booted) .. " phase=" .. PHASE()); W("draw_mods=" .. tostring(_G._SD.draw_mods or 0) .. " hooks=" .. tostring(_G._SD.draw_hooks or 0)); print("[SD] dumped") end
+_G.SD_HookNow    = function() pcall(HOOK_ALL); W("[MANUAL] re-arm") end
+_G.SD_ForceLevel = function() FORCE_PLAYER_LEVEL(); W("[MANUAL] level") end
+_G.SD_TestDraw   = function() SHOW_REWARD({ { resid = 403003, count = 1 } }); W("[MANUAL] test draw") end
 
--- ═══ ARM ═══
 do
     local ok, tk = pcall(require, "common.time_ticker")
     if ok and tk and tk.AddTimerLoop then
@@ -567,4 +520,4 @@ do
     end
 end
 
-print("[showroom_draw_unlock.lua v6] loaded — SHOWROOM + DRAW")
+print("[sd_v7.lua] loaded")
