@@ -1,17 +1,15 @@
 -- ═══════════════════════════════════════════════════════════════════
--- sd_v13.lua — LobbyThemeManager hook (REAL display system)
---   + UC spoof + draw (working) + LobbyThemeManager deep dump
+-- sd_v14.lua — LTM correct lookup + draw panel fixed
 -- ═══════════════════════════════════════════════════════════════════
 
 _G._SD = _G._SD or { booted = false, log = {} }
 
 local CFG = {
-    BRAND = "SD v13",
-    DUMP_FILE = "sd_v13_log_",
+    BRAND = "SD v14",
+    DUMP_FILE = "sd_v14_log_",
     SAVE_DIRS = {
         "/storage/emulated/0/Android/data/com.pubg.imobile/files/",
         "/storage/emulated/0/Android/data/com.pubg.krmobile/files/",
-        "/storage/emulated/0/Android/data/com.pubg.vng.pubgmobile/files/",
         "/storage/emulated/0/Android/data/com.pubg.vng.pubgmobile/files/",
         "/storage/emulated/0/Android/data/com.rekoo.pubgm/files/",
         "/sdcard/",
@@ -19,9 +17,6 @@ local CFG = {
     SAVE_KEY = "config.ini",
     TICK = 2.0,
     UC = 999999999,
-    -- Force display IDs (set to 0 to skip)
-    FORCE_VEHICLE_ID = 0,   -- set 0 = keep user's selection
-    FORCE_BANNER_ID  = 0,
 }
 
 local function POPUP(t, m)
@@ -61,24 +56,105 @@ local function GM(p)
     local ok, r = pcall(require, p); if ok then return r end
     return nil
 end
-local function UNWRAP(m)
-    if not m then return nil end
-    if type(m) == "table" and type(m.__inner_impl) == "table" then return m.__inner_impl end
-    return m
-end
-local function GMM(name)
+
+-- ═══════════════════════════════════════════════════════════════════
+-- LTM — CORRECT LOOKUP (uses ModuleManager config table reference)
+-- ═══════════════════════════════════════════════════════════════════
+
+local LTM = { module = nil, hooked = false }
+
+local function GET_MM()
     local ok, MM = pcall(require, "client.module_framework.ModuleManager")
     if not ok or not MM then return nil end
-    local ok2, m = pcall(function() return MM.GetModule(name) end)
-    if ok2 then return m end
+    return MM
+end
+
+local function FIND_LTM()
+    if LTM.module then return LTM.module end
+    local MM = GET_MM()
+    if not MM then W("[LTM] ModuleManager not found"); return nil end
+
+    -- Try config table path (from user's code)
+    local tried = {}
+    local ok1, cfg = pcall(function() return MM.LobbyModuleConfig.LobbyThemeManager end)
+    if ok1 and cfg then
+        tried[#tried+1] = "LobbyModuleConfig.LobbyThemeManager (config table)"
+        local ok2, m = pcall(function() return MM.GetModule(cfg) end)
+        if ok2 and m then LTM.module = m; W("[LTM] found via " .. tried[#tried]); return m end
+    end
+
+    -- Try string path
+    local ok3, m2 = pcall(function() return MM.GetModule("LobbyThemeManager") end)
+    if ok3 and m2 then LTM.module = m2; W("[LTM] found via string 'LobbyThemeManager'"); return m2 end
+
+    -- Try ThemeVehicleManager (sibling)
+    local ok4, m3 = pcall(function() return MM.GetModule(MM.LobbyModuleConfig.ThemeVehicleManager) end)
+    if ok4 and m3 then LTM.module = m3; W("[LTM] found ThemeVehicleManager"); return m3 end
+
+    -- Scan ModuleManager.LobbyModuleConfig for anything with Theme
+    pcall(function()
+        for k, v in pairs(MM.LobbyModuleConfig or {}) do
+            if type(k) == "string" and (string.find(k, "Theme") or string.find(k, "theme")) then
+                W("[LTM] LobbyModuleConfig has: " .. k)
+            end
+        end
+    end)
+
     return nil
 end
 
+local function DUMP_LTM()
+    local ltm = FIND_LTM()
+    if not ltm then W("[LTM] ✗ not found for dump"); return end
+    W("─── DUMP LTM ───")
+    local keys = {}
+    for k in pairs(ltm) do keys[#keys+1] = k end
+    table.sort(keys, function(a,b) return tostring(a) < tostring(b) end)
+    for _, k in ipairs(keys) do
+        local v = ltm[k]
+        if type(k) == "string" then
+            if type(v) == "function" then W("  fn: " .. k)
+            elseif type(v) == "table" then
+                local n = 0; for _ in pairs(v) do n = n + 1 end
+                W("  tbl[" .. n .. "]: " .. k)
+            elseif type(v) == "boolean" then W("  bool: " .. k .. " = " .. tostring(v))
+            elseif type(v) == "number" then W("  num: " .. k .. " = " .. tostring(v)) end
+        end
+    end
+end
+
+local function HOOK_LTM()
+    if LTM.hooked then return end
+    local ltm = FIND_LTM()
+    if not ltm then return end
+
+    local n = 0
+    if type(ltm.ShowGarageEffect) == "function" then
+        local orig = ltm.ShowGarageEffect
+        ltm.ShowGarageEffect = function(self, bShow, VehicleType)
+            W("[LTM] ShowGarageEffect bShow=" .. tostring(bShow) .. " veh=" .. tostring(VehicleType))
+            return orig(self, true, VehicleType)
+        end
+        n = n + 1
+    end
+    if type(ltm.GetDisplayItemID) == "function" then
+        local orig = ltm.GetDisplayItemID
+        ltm.GetDisplayItemID = function(self, ...)
+            local r = orig(self, ...)
+            W("[LTM] GetDisplayItemID → " .. tostring(r))
+            return r
+        end
+        n = n + 1
+    end
+    LTM.hooked = true
+    W("[LTM] hooked " .. n)
+end
+
 -- ═══════════════════════════════════════════════════════════════════
--- 1. UC SPOOF (working from v12)
+-- UC SPOOF
 -- ═══════════════════════════════════════════════════════════════════
 
-local KEYS = { "ticket","uc","gold","diamond","eternal_diamond","home_coin","bp","coupon","voucher","UC","Gold","Diamond" }
+local KEYS = { "ticket","uc","gold","diamond","eternal_diamond","home_coin","bp","coupon","voucher" }
 local function SPOOF_CURRENCY()
     local dm = _G.DataMgr
     if not dm then return end
@@ -95,8 +171,8 @@ local function SPOOF_CURRENCY()
         setmetatable(dm, mt)
     end)
     pcall(function()
-        if dm.GetUserData and not dm._sd13_gu then
-            dm._sd13_gu = true
+        if dm.GetUserData and not dm._sd14_gu then
+            dm._sd14_gu = true
             local orig = dm.GetUserData
             dm.GetUserData = function(a)
                 local d = orig(a)
@@ -108,116 +184,7 @@ local function SPOOF_CURRENCY()
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- 2. LobbyThemeManager — DUMP + HOOK
--- ═══════════════════════════════════════════════════════════════════
-
-local LTM = { module = nil, hooked = false }
-
-local function GET_LTM()
-    if LTM.module then return LTM.module end
-    -- Try multiple paths
-    local candidates = {
-        "LobbyModuleConfig.LobbyThemeManager",
-        "LobbyThemeManager",
-    }
-    for _, n in ipairs(candidates) do
-        local m = GMM(n)
-        if m then LTM.module = m; return m end
-    end
-    return nil
-end
-
-local function DUMP_LTM()
-    local ltm = GET_LTM()
-    if not ltm then W("[LTM] ✗ not found"); return end
-    W("─── DUMP LobbyThemeManager ───")
-    local keys = {}
-    for k in pairs(ltm) do keys[#keys+1] = k end
-    table.sort(keys, function(a,b) return tostring(a) < tostring(b) end)
-    for _, k in ipairs(keys) do
-        local v = ltm[k]
-        if type(k) == "string" then
-            if type(v) == "function" then W("  fn: " .. k)
-            elseif type(v) == "table" then
-                local n = 0; for _ in pairs(v) do n = n + 1 end
-                W("  tbl[" .. n .. "]: " .. k)
-            elseif type(v) == "boolean" then W("  bool: " .. k .. " = " .. tostring(v))
-            elseif type(v) == "number" then W("  num: " .. k .. " = " .. tostring(v))
-            elseif type(v) == "string" then W("  str: " .. k .. " = " .. v) end
-        end
-    end
-end
-
-local function HOOK_LTM()
-    if LTM.hooked then return end
-    local ltm = GET_LTM()
-    if not ltm then W("[LTM] ✗ not found for hooking"); return end
-
-    local n = 0
-
-    -- ShowGarageEffect — force true + force ID if set
-    if type(ltm.ShowGarageEffect) == "function" then
-        local orig = ltm.ShowGarageEffect
-        ltm.ShowGarageEffect = function(self, bShow, VehicleType)
-            W("[LTM] ShowGarageEffect called bShow=" .. tostring(bShow) .. " veh=" .. tostring(VehicleType))
-            -- Force show = true
-            local ok, r = pcall(orig, self, true, VehicleType)
-            return r
-        end
-        n = n + 1
-    end
-
-    -- GetDisplayItemID — log current
-    if type(ltm.GetDisplayItemID) == "function" then
-        local orig = ltm.GetDisplayItemID
-        ltm.GetDisplayItemID = function(self, ...)
-            local r = orig(self, ...)
-            W("[LTM] GetDisplayItemID → " .. tostring(r))
-            return r
-        end
-        n = n + 1
-    end
-
-    -- Auto-show loop
-    if not _G.BannerHookInitialized then
-        _G.BannerHookInitialized = true
-        W("[LTM] banner hook initialized")
-    end
-
-    LTM.hooked = true
-    W("[LTM] hooked " .. n .. " functions")
-end
-
--- ═══════════════════════════════════════════════════════════════════
--- 3. FORCE DISPLAY — set vehicle/banner/weapon display in lobby
--- ═══════════════════════════════════════════════════════════════════
-
-local function FORCE_DISPLAY()
-    local ltm = GET_LTM()
-    if not ltm then return end
-
-    -- Try to get display id, then force show
-    pcall(function()
-        if ltm.GetDisplayItemID and ltm.ShowGarageEffect then
-            local id = ltm:GetDisplayItemID()
-            if id and tonumber(id) and tonumber(id) > 0 then
-                ltm:ShowGarageEffect(true, id)
-                W("[DISP] forced show id=" .. tostring(id))
-            end
-        end
-    end)
-
-    -- If force ID set, use that
-    if CFG.FORCE_VEHICLE_ID > 0 and ltm.ShowGarageEffect then
-        pcall(function()
-            ltm:ShowGarageEffect(true, CFG.FORCE_VEHICLE_ID)
-            W("[DISP] forced id=" .. CFG.FORCE_VEHICLE_ID)
-        end)
-    end
-end
-
--- ═══════════════════════════════════════════════════════════════════
--- 4. DRAW (working from v12)
+-- DRAW — panel with multiple fallback routes
 -- ═══════════════════════════════════════════════════════════════════
 
 local RES_KEYS = { "resid","resID","res_id","itemid","itemID","item_id","ItemID","ItemId","award_item_id","awardItemId","reward_id","id" }
@@ -261,14 +228,56 @@ local function EXTRACT_POOL(m)
     return found
 end
 
+-- Multiple routes to show reward panel
 local function SHOW_REWARD(list)
-    if #list == 0 then return end
+    if #list == 0 then W("[SHOW] empty list"); return end
+
+    -- Route 1: Logic_CommonItemGet (multiple paths)
+    local LG_paths = {
+        "client.slua.logic.common.CommonItemGet.Logic_CommonItemGet",
+        "client.slua.logic.common.logic_common_item_get",
+        "GameLua.Mod.BaseMod.Client.CommonItemGet.CommonItemGet",
+        "client.slua.umg.Common.Common_Popup_Reward_Base",
+    }
+    local fmt = {}
+    for _, it in ipairs(list) do
+        fmt[#fmt+1] = { res_id = tonumber(it.resid) or 0, count = tonumber(it.count or 1) or 1, valid_hours = 0 }
+    end
+
+    for _, path in ipairs(LG_paths) do
+        local LG = GM(path)
+        if LG then
+            W("[SHOW] tried " .. path .. " has ShowPanel_DefaultStyle=" .. tostring(type(LG.ShowPanel_DefaultStyle)))
+            if type(LG.ShowPanel_DefaultStyle) == "function" then
+                local ok, err = pcall(function() LG.ShowPanel_DefaultStyle(fmt, false, true) end)
+                if ok then W("[SHOW] ✓ panel via " .. path); return end
+                W("[SHOW] ✗ " .. path .. " error: " .. tostring(err))
+            end
+        end
+    end
+
+    -- Route 2: UIManager open Common popup
     pcall(function()
-        local LG = GM("client.slua.logic.common.CommonItemGet.Logic_CommonItemGet")
-        if not LG or not LG.ShowPanel_DefaultStyle then return end
-        local f = {}
-        for _, it in ipairs(list) do f[#f+1] = { res_id = tonumber(it.resid) or 0, count = tonumber(it.count or 1), valid_hours = 0 } end
-        LG.ShowPanel_DefaultStyle(f, false, true)
+        local UM = _G.UIManager
+        if UM and UM.OpenUI and UM.UI_Config_Common and UM.UI_Config_Common.Common_Popup_Reward_Base then
+            UM:OpenUI(UM.UI_Config_Common.Common_Popup_Reward_Base, fmt)
+            W("[SHOW] ✓ via UIManager OpenUI")
+            return
+        end
+    end)
+
+    -- Route 3: Generic show message fallback
+    pcall(function()
+        local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
+                    or require("client.slua.logic.common.logic_common_msg_box")
+        if Msg and Msg.Show then
+            local t = ""
+            for i, it in ipairs(fmt) do
+                if i <= 3 then t = t .. "ID:" .. it.res_id .. " x" .. it.count .. "\n" end
+            end
+            Msg.Show(4, "★ FAKE DRAW ★", t)
+            W("[SHOW] ✓ fallback msgbox")
+        end
     end)
 end
 
@@ -279,7 +288,7 @@ local function PROCESS_DRAW(m, tag, cnt)
     if #uniq == 0 then W("[DRAW:" .. tag .. "] empty"); return end
     local picked = {}
     for i = 1, cnt do picked[#picked+1] = { resid = uniq[math.random(1, #uniq)].resid, count = 1 } end
-    W("[DRAW:" .. tag .. "] picked " .. #picked)
+    W("[DRAW:" .. tag .. "] picked " .. #picked .. " → showing panel")
     SHOW_REWARD(picked)
 end
 
@@ -307,7 +316,7 @@ local function HOOK_DRAW()
         if m then
             m_ok = m_ok + 1
             for _, fn in ipairs(e.fns) do
-                local tag = "_sd13_" .. e.tag .. "_" .. fn
+                local tag = "_sd14_" .. e.tag .. "_" .. fn
                 if type(m[fn]) == "function" and not m[tag] then
                     if pcall(function()
                         m[tag] = true
@@ -329,12 +338,11 @@ end
 -- ═══════════════════════════════════════════════════════════════════
 
 function HOOK_ALL()
-    W("═══ SD v13 ═══")
+    W("═══ SD v14 ═══")
     pcall(SPOOF_CURRENCY)
     pcall(HOOK_LTM)
     pcall(DUMP_LTM)
     pcall(HOOK_DRAW)
-    pcall(FORCE_DISPLAY)
     W("═══ DONE ═══")
 end
 
@@ -352,11 +360,11 @@ local function BOOT()
     _G._SD.booted = true
     _PATH = RESOLVE()
     W("═══════════════════════════")
-    W("  SD v13 — LTM HOOK")
+    W("  SD v14")
     W("  Log: " .. tostring(_PATH))
     W("═══════════════════════════")
     pcall(HOOK_ALL)
-    POPUP("★ SD v13 ★", "LobbyThemeManager hooked.\nCheck log for LTM dump.")
+    POPUP("★ SD v14 ★", "LTM fixed + draw fallback")
 end
 
 local function PHASE()
@@ -383,7 +391,6 @@ local function WATCH()
         if p == "lobby" then
             pcall(HOOK_LTM)
             pcall(HOOK_DRAW)
-            pcall(FORCE_DISPLAY)
         end
     end
 end
@@ -391,6 +398,7 @@ end
 _G.SD_Status  = function() W("── STATUS ──"); W("booted=" .. tostring(_G._SD.booted)); print("[SD] status") end
 _G.SD_HookNow = function() HOOK_ALL(); W("[MANUAL] re-arm") end
 _G.SD_DumpLTM = function() DUMP_LTM() end
+_G.SD_TestDraw = function() SHOW_REWARD({ { resid = 1030060794, count = 1 } }); W("[MANUAL] test draw") end
 
 do
     local ok, tk = pcall(require, "common.time_ticker")
@@ -401,4 +409,4 @@ do
     end
 end
 
-print("[sd_v13.lua] LTM hook loaded")
+print("[sd_v14.lua] loaded")
