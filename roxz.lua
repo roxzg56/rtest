@@ -1,12 +1,14 @@
 -- ═══════════════════════════════════════════════════════════════════
--- sd_v17.lua — AUTO-INJECT on showroom enter
---   No manual command needed. Trigger on EntryVisitCollectionHall.
+-- sd_v18.lua — CLEAN INJECT (from learned signatures)
+--   weapon/avatar: v3 pattern (0, res_id, 0, 0, 0, 0, 1) → OK
+--   vehicle:       force via ProcOneDisplayInfo (TryPutOnItem crashes)
+--   padlock kill:  aggressive widget scan
 -- ═══════════════════════════════════════════════════════════════════
 
 _G._SD = _G._SD or { booted = false, log = {} }
 
 local CFG = {
-    DUMP_FILE = "sd_v17_log_",
+    DUMP_FILE = "sd_v18_log_",
     SAVE_DIRS = {
         "/storage/emulated/0/Android/data/com.pubg.imobile/files/",
         "/storage/emulated/0/Android/data/com.pubg.krmobile/files/",
@@ -17,12 +19,11 @@ local CFG = {
     },
     SAVE_KEY = "config.ini",
     TICK = 1.5,
+    AUTO_DELAY = 0.8,
+    -- Change these to inject other items
     FAKE_VEHICLE = 1901001,
     FAKE_WEAPON  = 101001,
     FAKE_AVATAR  = 1000079,
-    SLOT_HALL_PART = 0,
-    SLOT_INDEX = 0,
-    AUTO_DELAY = 1.0,   -- seconds after showroom enter
 }
 
 local function POPUP(t, m)
@@ -90,107 +91,61 @@ local function GETCHAR()
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- INJECT LOGIC
+-- CLEAN INJECT — only the v3 pattern (which worked)
 -- ═══════════════════════════════════════════════════════════════════
 
-local TARGETS = {
-    { tag="vehicle", path="GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Vehicle_Client", fake=CFG.FAKE_VEHICLE },
-    { tag="weapon",  path="GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Weapon_Client",  fake=CFG.FAKE_WEAPON },
-    { tag="avatar",  path="GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Avatar_Client",  fake=CFG.FAKE_AVATAR },
-}
+local WEAPON_PATH  = "GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Weapon_Client"
+local AVATAR_PATH  = "GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Avatar_Client"
+local VEHICLE_PATH = "GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Vehicle_Client"
 
-local LEARNED = {}
-
-local function TRY_INJECT(tag, path, fake)
+local function INJECT_V3(tag, path, fake)
     local impl = UNWRAP(GM(path))
     if not impl or type(impl.TryPutOnItem) ~= "function" then
-        W("[INJ:" .. tag .. "] not loaded"); return
+        W("[INJ:" .. tag .. "] not available"); return false
     end
-    W("[INJ:" .. tag .. "] fake=" .. fake)
-
-    -- If we learned real signature from observation, use it
-    local sig = LEARNED[tag]
-    if sig then
-        local args = {}
-        for i, a in ipairs(sig) do
-            if type(a) == "number" and a == 0 then args[i] = fake
-            elseif type(a) == "number" then args[i] = a
-            elseif type(a) == "table" then
-                local t = {}
-                for k, v in pairs(a) do t[k] = v end
-                t.res_id = fake; t.resid = fake; t.resID = fake
-                args[i] = t
-            else args[i] = a end
-        end
-        local ok = pcall(function() impl:TryPutOnItem(table.unpack(args)) end)
-        W("[INJ:" .. tag .. "] learned-sig → ok=" .. tostring(ok))
-        if ok then return true end
-    end
-
-    -- Fallback variations
-    local vars = {
-        { CFG.SLOT_HALL_PART, CFG.SLOT_INDEX, fake, 0, 0, 0, 1 },
-        { CFG.SLOT_HALL_PART, CFG.SLOT_INDEX, fake, 0, 0, 0, 1, 0 },
-        { CFG.SLOT_INDEX, fake, 0, 0, 0, 0, 1 },
-        { fake, 0, CFG.SLOT_HALL_PART, CFG.SLOT_INDEX, 0, 0, 1 },
-        { { res_id=fake, resid=fake, resID=fake, item_id=fake, count=1,
-            ins_id=0, hall_part=CFG.SLOT_HALL_PART, slot_index=CFG.SLOT_INDEX },
-          CFG.SLOT_HALL_PART, CFG.SLOT_INDEX, fake, 0, 0, 0, 1 },
-    }
-    for vi, a in ipairs(vars) do
-        local ok, err = pcall(function() impl:TryPutOnItem(table.unpack(a)) end)
-        W("[INJ:" .. tag .. "] v" .. vi .. " → ok=" .. tostring(ok) .. " err=" .. tostring(err):sub(1,100))
-        if ok then return true end
-    end
-    return false
-end
-
-local function FAB(tag, fake)
-    return {
-        hall_part=CFG.SLOT_HALL_PART, hallPart=CFG.SLOT_HALL_PART,
-        slot_index=CFG.SLOT_INDEX, slotIndex=CFG.SLOT_INDEX, slot=CFG.SLOT_INDEX,
-        res_id=fake, resid=fake, resID=fake, item_id=fake, itemid=fake,
-        ins_id=0, instid=0, count=1, color=0, pattern=0, level=1,
-        is_lock=false, isLock=false, is_unlock=true, isUnlock=true, unlock=true,
-    }
-end
-
-local function TRY_PROC(tag, path, fake)
-    local impl = UNWRAP(GM(path))
-    if not impl or type(impl.ProcOneDisplayInfo) ~= "function" then return false end
-    local info = FAB(tag, fake)
-    local ok = pcall(function() impl:ProcOneDisplayInfo(CFG.SLOT_HALL_PART, info) end)
-    if not ok then ok = pcall(function() impl:ProcOneDisplayInfo(info) end) end
-    W("[PROC:" .. tag .. "] ok=" .. tostring(ok))
+    -- v3 pattern: (0, res_id, 0, 0, 0, 0, 1)
+    local ok, err = pcall(function() impl:TryPutOnItem(0, fake, 0, 0, 0, 0, 1) end)
+    W("[INJ:" .. tag .. "] v3 → ok=" .. tostring(ok) .. (ok and "" or (" err=" .. tostring(err):sub(1,100))))
     return ok
 end
 
-local function FORCE_REFRESH()
-    for _, p in ipairs({
-        "GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Vehicle_Client",
-        "GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Weapon_Client",
-        "GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Avatar_Client",
-    }) do
-        local impl = UNWRAP(GM(p))
-        if impl and type(impl.UpdateDisplayInfoFromDS) == "function" then
-            pcall(function() impl:UpdateDisplayInfoFromDS(nil) end)
-        end
-    end
+-- Fallback: ProcOneDisplayInfo for vehicle (which crashed on TryPutOnItem)
+local function FABRICATE_INFO(tag, fake)
+    return {
+        hall_part=0, hallPart=0,
+        slot_index=0, slotIndex=0, slot=0,
+        res_id=fake, resid=fake, resID=fake,
+        item_id=fake, itemid=fake,
+        ins_id=0, instid=0,
+        count=1, color=0, pattern=0, level=1,
+        is_lock=false, isLock=false,
+        is_unlock=true, isUnlock=true, unlock=true,
+    }
+end
+
+local function INJECT_PROC(tag, path, fake)
+    local impl = UNWRAP(GM(path))
+    if not impl or type(impl.ProcOneDisplayInfo) ~= "function" then return false end
+    local info = FABRICATE_INFO(tag, fake)
+    local ok, err = pcall(function() impl:ProcOneDisplayInfo(0, info) end)
+    W("[PROC:" .. tag .. "] → ok=" .. tostring(ok) .. (ok and "" or (" err=" .. tostring(err):sub(1,100))))
+    return ok
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- PADLOCK HIDE
+-- AGGRESSIVE PADLOCK KILL
 -- ═══════════════════════════════════════════════════════════════════
 
-local function HIDE_LOCKS(uibp)
-    if not uibp then return 0 end
+local function KILL_ALL_LOCKS(uibp, tag)
+    if not uibp or type(uibp) ~= "table" then return 0 end
     local n = 0
     pcall(function()
         local ESV = import("ESlateVisibility")
         for k, v in pairs(uibp) do
             if type(k) == "string" and v and slua.isValid(v) then
                 local lower = string.lower(k)
-                if string.find(lower, "lock", 1, true) or string.find(lower, "padlock", 1, true) then
+                if string.find(lower, "lock", 1, true) or string.find(lower, "padlock", 1, true)
+                   or string.find(lower, "kong", 1, true) or string.find(lower, "suo", 1, true) then
                     pcall(function()
                         if v.SetVisibility then v:SetVisibility(ESV and ESV.Collapsed or 2) end
                         if v.SetRenderOpacity then v:SetRenderOpacity(0) end
@@ -208,80 +163,79 @@ local SLOT_KEYS = {
     "SocialLobby_WeaponSlot_UIBP","SocialLobby_PetSlot_UIBP","SocialLobby_BGWallSlot_UIBP",
 }
 
-local function HOOK_HIDE_ON_SLOTS()
-    for _, key in ipairs(SLOT_KEYS) do
-        local impl = UNWRAP(GM("client.slua.umg.lobby.Left.3DUIOverride." .. key))
-        if impl then
-            for _, fn in ipairs({ "OnPostInitialize","Initialize","OnShow","RefreshModelShow" }) do
-                if type(impl[fn]) == "function" and not impl["_sd17_h_" .. fn] then
-                    impl["_sd17_h_" .. fn] = true
-                    local orig = impl[fn]
-                    impl[fn] = function(self, ...)
-                        local r = orig(self, ...)
-                        local c = GETCHAR()
-                        if c and c.AddGameTimer then
-                            c:AddGameTimer(0.15, false, function()
-                                local cnt = HIDE_LOCKS(self)
-                                if cnt > 0 then W("[HIDE] " .. key .. " → " .. cnt) end
-                            end)
-                        end
-                        return r
-                    end
+local function HOOK_SLOT_UI_ONCE(key)
+    local impl = UNWRAP(GM("client.slua.umg.lobby.Left.3DUIOverride." .. key))
+    if not impl then return end
+    for _, fn in ipairs({ "OnPostInitialize","Initialize","OnShow","RefreshModelShow","OnUpdateVehicleFeatureData" }) do
+        if type(impl[fn]) == "function" and not impl["_sd18_" .. fn] then
+            impl["_sd18_" .. fn] = true
+            local orig = impl[fn]
+            impl[fn] = function(self, ...)
+                local r = orig(self, ...)
+                local c = GETCHAR()
+                if c and c.AddGameTimer then
+                    c:AddGameTimer(0.15, false, function()
+                        local cnt = KILL_ALL_LOCKS(self, key)
+                        if cnt > 0 then W("[HIDE] " .. key .. "→" .. cnt) end
+                    end)
+                else
+                    KILL_ALL_LOCKS(self, key)
                 end
+                return r
             end
         end
     end
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- OBSERVE — learn signatures from natural clicks
+-- KILL LOCK POPUP
 -- ═══════════════════════════════════════════════════════════════════
 
-local function HOOK_OBSERVE()
-    for _, t in ipairs(TARGETS) do
-        local impl = UNWRAP(GM(t.path))
-        if impl then
-            if type(impl.TryPutOnItem) == "function" and not impl._sd17_observe then
-                impl._sd17_observe = true
-                local orig = impl.TryPutOnItem
-                impl.TryPutOnItem = function(self, ...)
-                    local args = { ... }
-                    LEARNED[t.tag] = args
-                    W("[LEARN:" .. t.tag .. "] TryPutOnItem(" .. #args .. " args)")
-                    for i, a in ipairs(args) do
-                        local s = tostring(a)
-                        if #s > 60 then s = s:sub(1, 60) .. ".." end
-                        W("  a" .. i .. " [" .. type(a) .. "] = " .. s)
-                    end
-                    return orig(self, ...)
-                end
-            end
-        end
+local function KILL_POPUP()
+    local popup = UNWRAP(GM("GameLua.Mod.PlanCH.Client.UI.Popup.PlanCH_Hall_Slot_Locked_UIBP"))
+    if not popup then return end
+    for _, fn in ipairs({ "OnShow","UpdateUI","UpdateSlotInfo","OnHallSlotUnlock","AdjustUIPosition" }) do
+        pcall(function() popup[fn] = function() end end)
     end
+    W("[POPUP] locked popup killed")
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- AUTO-INJECT on showroom enter
+-- MAIN AUTO INJECT
 -- ═══════════════════════════════════════════════════════════════════
 
 local function AUTO_INJECT()
-    W("═══ AUTO INJECT ═══")
-    for _, t in ipairs(TARGETS) do
-        pcall(TRY_INJECT, t.tag, t.path, t.fake)
-        pcall(TRY_PROC, t.tag, t.path, t.fake)
+    W("═══ INJECT ═══")
+
+    -- Weapon: v3 pattern works
+    INJECT_V3("weapon", WEAPON_PATH, CFG.FAKE_WEAPON)
+    INJECT_PROC("weapon", WEAPON_PATH, CFG.FAKE_WEAPON)
+
+    -- Avatar: v3 pattern works
+    INJECT_V3("avatar", AVATAR_PATH, CFG.FAKE_AVATAR)
+    INJECT_PROC("avatar", AVATAR_PATH, CFG.FAKE_AVATAR)
+
+    -- Vehicle: TryPutOnItem crashes, so just ProcOneDisplayInfo + direct display info injection
+    INJECT_PROC("vehicle", VEHICLE_PATH, CFG.FAKE_VEHICLE)
+
+    -- Kill padlocks
+    for _, key in ipairs(SLOT_KEYS) do
+        local impl = UNWRAP(GM("client.slua.umg.lobby.Left.3DUIOverride." .. key))
+        if impl then KILL_ALL_LOCKS(impl, key) end
     end
-    pcall(FORCE_REFRESH)
-    pcall(HOOK_HIDE_ON_SLOTS)
-    POPUP("★ SD v17 ★", "Auto-inject done")
-    W("═══ AUTO INJECT DONE ═══")
+
+    W("═══ DONE ═══")
 end
 
+-- ═══════════════════════════════════════════════════════════════════
+-- HOOK ENTRY
+-- ═══════════════════════════════════════════════════════════════════
+
 local function HOOK_ENTRY()
-    -- Multiple entry points to catch showroom open
     local entry = UNWRAP(GM("client.slua.logic.CollectionHall.LogicCollectionHallEntry"))
     if entry then
-        HK(entry, "EntryVisitCollectionHall", "_sd17_entry", function()
-            W("[ENTRY] showroom entry detected")
+        HK(entry, "EntryVisitCollectionHall", "_sd18_entry", function()
+            W("[ENTRY] showroom enter")
             local c = GETCHAR()
             if c and c.AddGameTimer then
                 c:AddGameTimer(CFG.AUTO_DELAY, false, AUTO_INJECT)
@@ -289,29 +243,15 @@ local function HOOK_ENTRY()
                 AUTO_INJECT()
             end
         end)
-        W("[ENTRY] EntryVisitCollectionHall hooked")
     end
 
-    -- Hall data OnHallLevelChanged — fires on showroom load
-    local hd = UNWRAP(GM("GameLua.Mod.PlanCH.Client.SubSystem.HallData.PlanCH_HallData_Client"))
-    if hd then
-        HK(hd, "OnHallLevelChanged", "_sd17_hall", function()
-            W("[ENTRY] hall level changed")
-            local c = GETCHAR()
-            if c and c.AddGameTimer then
-                c:AddGameTimer(CFG.AUTO_DELAY, false, AUTO_INJECT)
-            end
-        end)
-    end
-
-    -- Display subsystems OnInit — fires when editor opens
-    for _, t in ipairs(TARGETS) do
-        local impl = UNWRAP(GM(t.path))
-        if impl and type(impl.OnInit) == "function" and not impl._sd17_init then
-            impl._sd17_init = true
+    -- OnInit triggers
+    for _, path in ipairs({ WEAPON_PATH, AVATAR_PATH, VEHICLE_PATH }) do
+        local impl = UNWRAP(GM(path))
+        if impl and type(impl.OnInit) == "function" and not impl._sd18_init then
+            impl._sd18_init = true
             local orig = impl.OnInit
             impl.OnInit = function(self, ...)
-                W("[ENTRY] " .. t.tag .. " OnInit")
                 local c = GETCHAR()
                 if c and c.AddGameTimer then
                     c:AddGameTimer(CFG.AUTO_DELAY, false, AUTO_INJECT)
@@ -321,13 +261,12 @@ local function HOOK_ENTRY()
         end
     end
 
-    -- OnPostEnterEditMode — for weapon
-    local w = UNWRAP(GM("GameLua.Mod.PlanCH.Client.SubSystem.Display.PlanCH_Display_Weapon_Client"))
-    if w and type(w.OnPostEnterEditMode) == "function" and not w._sd17_edit then
-        w._sd17_edit = true
+    -- Weapon edit mode
+    local w = UNWRAP(GM(WEAPON_PATH))
+    if w and type(w.OnPostEnterEditMode) == "function" and not w._sd18_edit then
+        w._sd18_edit = true
         local orig = w.OnPostEnterEditMode
         w.OnPostEnterEditMode = function(self, ...)
-            W("[ENTRY] weapon edit mode")
             local c = GETCHAR()
             if c and c.AddGameTimer then c:AddGameTimer(CFG.AUTO_DELAY, false, AUTO_INJECT) end
             return orig(self, ...)
@@ -343,15 +282,15 @@ local function BOOT()
     if _G._SD.booted then return end
     _G._SD.booted = true
     _PATH = RESOLVE()
-    W("═══════════════════════════")
-    W("  SD v17 — AUTO INJECT")
+    W("═══════════════════")
+    W("  SD v18")
     W("  Log: " .. tostring(_PATH))
-    W("═══════════════════════════")
+    W("═══════════════════")
+    pcall(KILL_POPUP)
     pcall(HOOK_ENTRY)
-    pcall(HOOK_OBSERVE)
-    pcall(HOOK_HIDE_ON_SLOTS)
-    POPUP("★ SD v17 ★", "Auto-inject on showroom enter.\nBas showroom kholo.")
-    W("Ready — open showroom")
+    for _, k in ipairs(SLOT_KEYS) do pcall(HOOK_SLOT_UI_ONCE, k) end
+    POPUP("★ SD v18 ★", "Clean inject + padlock kill.\nShowroom kholo.")
+    W("Ready")
 end
 
 local function PHASE()
@@ -374,22 +313,28 @@ local function WATCH()
         _last = p
         W("[PHASE] → " .. p)
         if p == "lobby" then
+            pcall(KILL_POPUP)
             pcall(HOOK_ENTRY)
-            pcall(HOOK_OBSERVE)
-            pcall(HOOK_HIDE_ON_SLOTS)
+            for _, k in ipairs(SLOT_KEYS) do pcall(HOOK_SLOT_UI_ONCE, k) end
         end
     end
 end
 
-_G.SD_Inject    = function() AUTO_INJECT() end
-_G.SD_Status    = function() W("booted=" .. tostring(_G._SD.booted)); print("[SD] status") end
-_G.SD_SetFake   = function(kind, id)
+-- Manual
+_G.SD_Inject = function() AUTO_INJECT() end
+_G.SD_KillLocks = function()
+    for _, key in ipairs(SLOT_KEYS) do
+        local impl = UNWRAP(GM("client.slua.umg.lobby.Left.3DUIOverride." .. key))
+        if impl then KILL_ALL_LOCKS(impl, key) end
+    end
+    W("[MANUAL] locks killed")
+end
+_G.SD_SetFake = function(kind, id)
     id = tonumber(id) or 0
     kind = tostring(kind or ""):lower()
     if kind == "vehicle" then CFG.FAKE_VEHICLE = id
     elseif kind == "weapon" then CFG.FAKE_WEAPON = id
     elseif kind == "avatar" then CFG.FAKE_AVATAR = id end
-    W("[SET] " .. kind .. " = " .. id)
 end
 
 do
@@ -401,4 +346,4 @@ do
     end
 end
 
-print("[sd_v17.lua] AUTO-INJECT loaded")
+print("[sd_v18.lua] loaded")
