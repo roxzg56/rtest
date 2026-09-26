@@ -1,18 +1,15 @@
 -- ═══════════════════════════════════════════════════════════════════
--- FIX v6 — INSTANCE RESOLVER (not class)
--- Reason: __inner_impl is CLASS. Data is on INSTANCE.
+-- INSTANCE HUNTER v7 — Find instance anywhere in game memory
 -- ═══════════════════════════════════════════════════════════════════
 
 local DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
 
-local function POPUP(title, msg)
+local function POPUP(t, m)
     pcall(function()
-        local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
+        local M = package.loaded["client.slua.logic.common.logic_common_msg_box"]
             or (pcall(require, "client.slua.logic.common.logic_common_msg_box")
                 and require("client.slua.logic.common.logic_common_msg_box"))
-        if Msg and Msg.Show then
-            Msg.Show(1, tostring(title), tostring(msg), function() end, function() end, "OK", "CLOSE")
-        end
+        if M and M.Show then M.Show(1, tostring(t), tostring(m), function() end, function() end, "OK", "CLOSE") end
     end)
 end
 
@@ -45,131 +42,255 @@ local function V(v, d, m)
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- INSTANCE RESOLVER — find the real instance
+-- HUNTER: find every table that has SetCurUId / GetCurUId as functions
 -- ═══════════════════════════════════════════════════════════════════
-local function resolveInstance()
+_G.InstanceHunter = function()
     local out = {}
     local function w(s) out[#out+1] = tostring(s) end
-    w("═══ INSTANCE RESOLVER ═══")
+    w("═══ INSTANCE HUNTER v7 ═══")
+    w("Time: " .. os.date("%Y-%m-%d %H:%M:%S"))
     w("")
 
-    -- Method 1: ModuleManager.GetModule
+    -- METHOD 1: ModuleManager.GetModule with various call styles
+    w("═══ METHOD 1: ModuleManager.GetModule ═══")
     local MM = _G.ModuleManager
-    if type(MM) == "table" and type(MM.GetModule) == "function" then
-        pcall(function()
-            local cfg = MM.LobbyModuleConfig and MM.LobbyModuleConfig.Logic_SocialLobbyModule
-            if not cfg then
-                -- try other key names
-                for k, v in pairs(MM.LobbyModuleConfig or {}) do
-                    if type(v) == "table" and type(v.ModuleName) == "string" 
-                       and v.ModuleName:find("SocialLobby") then
-                        cfg = v
-                        break
-                    end
-                end
-            end
-            if cfg then
-                w("cfg found: " .. tostring(cfg.ModuleName))
-                local inst = MM:GetModule(cfg)
-                if inst and type(inst) == "table" then
-                    w("INSTANCE VIA GetModule: table(" .. 
-                        (function() local n=0;for _ in pairs(inst)do n=n+1 end;return n end)() .. ")")
-                    -- Check for data fields
-                    local dataFields = { "_tOthersSocialDataMap", "_tSocialDataGetTime",
-                                         "_tSlotTypeMaxCountMap", "_tUCUnlockSlotMaxCount",
-                                         "_tWeaponSlotIndex", "_nCurWeaponPage",
-                                         "_nCreateModelIndex", "_bGMIsShowMark",
-                                         "_bIsShowQualityEffectHideTip" }
-                    for _, fn in ipairs(dataFields) do
-                        if inst[fn] ~= nil then
-                            w("  inst." .. fn .. " = " .. V(inst[fn], 0, 3))
+    if type(MM) == "table" then
+        w("ModuleManager type: table")
+        w("GetModule type: " .. type(MM.GetModule))
+        w("LobbyModuleConfig type: " .. type(MM.LobbyModuleConfig))
+        
+        if type(MM.LobbyModuleConfig) == "table" then
+            for key, cfg in pairs(MM.LobbyModuleConfig) do
+                if type(cfg) == "table" and type(cfg.ModuleName) == "string" 
+                   and cfg.ModuleName:find("SocialLobby") then
+                    w("  Found cfg: " .. tostring(key) .. " → " .. cfg.ModuleName)
+                    -- Try different call styles
+                    local tries = {
+                        { "MM:GetModule(cfg)", function() return MM:GetModule(cfg) end },
+                        { "MM.GetModule(MM, cfg)", function() return MM.GetModule(MM, cfg) end },
+                        { "MM.GetModule(cfg)", function() return MM.GetModule(cfg) end },
+                        { "MM:GetModule(cfg.KeyName)", function() return MM:GetModule(cfg.KeyName) end },
+                        { "MM:GetModule(cfg.ModuleName)", function() return MM:GetModule(cfg.ModuleName) end },
+                    }
+                    for _, t in ipairs(tries) do
+                        local ok, r = pcall(t[2])
+                        w("  " .. t[1] .. " → " .. (ok and type(r) or ("ERR:"..tostring(r):sub(1,80))))
+                        if ok and type(r) == "table" then
+                            local n = 0; for _ in pairs(r) do n = n + 1 end
+                            w("    KEYS: " .. n)
+                            -- Check for data field
+                            if r._tOthersSocialDataMap ~= nil then
+                                w("    ✓ HAS _tOthersSocialDataMap")
+                                w("    " .. V(r._tOthersSocialDataMap, 0, 2))
+                            end
                         end
                     end
-                    return inst, "GetModule"
-                else
-                    w("GetModule returned: " .. tostring(inst))
                 end
             end
-        end)
+        end
+    else
+        w("ModuleManager NOT a table")
     end
 
-    -- Method 2: File-level .instance
-    local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
-    if type(M) == "table" then
-        w("")
-        w("Checking M fields for instance...")
-        for _, k in ipairs({ "instance", "_instance", "obj", "_obj", "__obj", "self", "__instance" }) do
-            if M[k] ~= nil then
-                w("  M." .. k .. " = " .. type(M[k]))
+    -- METHOD 2: Scan package.loaded for module files
+    w("")
+    w("═══ METHOD 2: Scan package.loaded ═══")
+    for path, mod in pairs(package.loaded) do
+        if type(path) == "string" and path:find("SocialLobby") then
+            w("  " .. path .. " = " .. type(mod))
+            if type(mod) == "table" then
+                local n = 0; for _ in pairs(mod) do n = n + 1 end
+                w("    keys: " .. n)
             end
         end
+    end
 
-        -- Method 3: Check __inner_impl.__class
-        if type(M.__inner_impl) == "table" and type(M.__inner_impl.__class) == "table" then
-            w("")
-            w("M.__inner_impl.__class exists")
+    -- METHOD 3: Deep scan _G for tables with SetCurUId function
+    w("")
+    w("═══ METHOD 3: Deep scan _G for instance-like tables ═══")
+    local candidates = {}
+    local function checkTable(t, name, depth)
+        if depth > 3 then return end
+        if type(t) ~= "table" then return end
+        if candidates[t] then return end
+        candidates[t] = name
+        -- Check signature
+        if type(t.SetCurUId) == "function" or type(t.GetCurUId) == "function"
+           or type(t.GetSlotDataBySlotTypeAndIndex) == "function" then
+            w("  ✓ CANDIDATE: " .. name)
+            w("    SetCurUId=" .. type(t.SetCurUId) .. 
+              " GetCurUId=" .. type(t.GetCurUId) ..
+              " GetSlotData=" .. type(t.GetSlotDataBySlotTypeAndIndex))
+            w("    _tOthersSocialDataMap=" .. type(t._tOthersSocialDataMap))
         end
-
-        -- Method 4: M.__inner_impl.__bounds (Lua 5.3 has upvalue bounds sometimes)
-        if type(M.__inner_impl) == "table" and M.__inner_impl.__bounds ~= nil then
-            w("  M.__inner_impl.__bounds = " .. V(M.__inner_impl.__bounds, 0, 3))
+    end
+    
+    for k, v in pairs(_G) do
+        if type(k) == "string" then
+            checkTable(v, "_G." .. k, 1)
         end
     end
 
-    -- Method 5: scan _G for instances
+    -- METHOD 4: scan known game-wide containers
     w("")
-    w("Scanning _G for SocialLobby refs...")
-    for k, v in pairs(_G) do
-        if type(k) == "string" and k:lower():find("sociallobby") then
-            w("  _G." .. k .. " = " .. type(v))
+    w("═══ METHOD 4: Known containers ═══")
+    local containers = { "Game", "GameplayData", "UIManager", "UIManagerInstance",
+                          "slua_GameFrontendHUD", "GameFrontendHUD", "Client",
+                          "EventSystem", "PlayerController", "LocalPlayer" }
+    for _, cn in ipairs(containers) do
+        local c = _G[cn]
+        if c ~= nil then
+            w("  _G." .. cn .. " = " .. type(c))
+            if type(c) == "table" then
+                for k, v in pairs(c) do
+                    if type(k) == "string" and type(v) == "table" then
+                        if type(v.SetCurUId) == "function" or type(v.GetSlotDataBySlotTypeAndIndex) == "function" then
+                            w("    ✓ " .. cn .. "." .. k .. " has slot signature")
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- METHOD 5: Search through all LobbyModuleConfig-loaded modules
+    w("")
+    w("═══ METHOD 5: All LobbyModuleConfig instances ═══")
+    if MM and type(MM.LobbyModuleConfig) == "table" and type(MM.GetModule) == "function" then
+        local found = 0
+        for key, cfg in pairs(MM.LobbyModuleConfig) do
+            local ok, inst = pcall(MM.GetModule, MM, cfg)
+            if ok and type(inst) == "table" then
+                if type(inst.SetCurUId) == "function" 
+                   or type(inst.GetSlotDataBySlotTypeAndIndex) == "function"
+                   or type(inst.SetSlotUnlocked) == "function" then
+                    w("  ✓ " .. tostring(key) .. " → instance has slot signature")
+                    w("    " .. V(inst, 0, 1))
+                    found = found + 1
+                end
+            end
+        end
+        w("  Found: " .. found .. " instances")
+    end
+
+    -- METHOD 6: Hook metamethods / __index to catch instance creation
+    w("")
+    w("═══ METHOD 6: Module class analysis ═══")
+    local M = package.loaded["client.slua.logic.lobby.Left.Logic_SocialLobbyModule"]
+    if type(M) == "table" then
+        w("M type: table")
+        w("M.__class: " .. type(M.__class))
+        w("M.__instance: " .. type(M.__instance))
+        w("M.instance: " .. type(M.instance))
+        
+        -- Check metatable
+        local mt = getmetatable(M)
+        if mt then
+            w("M metatable: " .. V(mt, 0, 2))
+            if mt.__call then w("  mt.__call = " .. tostring(mt.__call)) end
+            if mt.__index then w("  mt.__index = " .. type(mt.__index)) end
+        end
+        
+        -- Check __class
+        if type(M.__class) == "table" then
+            w("M.__class keys:")
+            local i = 0
+            for k, v in pairs(M.__class) do
+                i = i + 1
+                if i > 20 then break end
+                w("  " .. tostring(k) .. " = " .. type(v))
+            end
+            -- Is there a constructor?
+            if type(M.__class.ctor) == "function" then
+                w("  ✓ M.__class.ctor exists")
+            end
+            if type(M.__class.new) == "function" then
+                w("  ✓ M.__class.new exists")
+            end
         end
     end
 
     local txt = table.concat(out, "\n")
-    W("instance_resolve.txt", txt)
-    return nil, "not found"
+    W("instance_hunter.txt", txt)
+    print(txt)
+    return txt
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- FULL INSTANCE DUMP — once resolved
+-- MEMORY HOOK — catch instance when it's created
 -- ═══════════════════════════════════════════════════════════════════
-_G.InstDump = function()
-    local inst, method = resolveInstance()
-    if not inst then
-        POPUP("INSTANCE", "Not found. Check instance_resolve.txt")
-        return
+_G.HookInstanceCreation = function()
+    local M = package.loaded["client.slua.logic.lobby.Left.Logic_SocialLobbyModule"]
+    if type(M) ~= "table" then print("[HOOK] M not loaded") return end
+
+    -- Hook __class metatable
+    if type(M.__class) == "table" then
+        local cls = M.__class
+        local mt = getmetatable(cls)
+        if mt and type(mt.__call) == "function" then
+            local origCall = mt.__call
+            mt.__call = function(...)
+                local inst = origCall(...)
+                if type(inst) == "table" then
+                    _G._SocialLobbyInstance = inst
+                    print("[HOOK] Instance created! _G._SocialLobbyInstance set")
+                    POPUP("INSTANCE CAUGHT", "Instance created!\nNow use InstInjectSlots()")
+                end
+                return inst
+            end
+            print("[HOOK] Hooked __call")
+        end
     end
 
+    -- Also hook the module M itself
+    local mtM = getmetatable(M)
+    if mtM and type(mtM.__call) == "function" then
+        local origM = mtM.__call
+        mtM.__call = function(...)
+            local r = origM(...)
+            if type(r) == "table" and (r.SetCurUId or r.GetSlotDataBySlotTypeAndIndex) then
+                _G._SocialLobbyInstance = r
+                print("[HOOK] Instance via M.__call! set _G._SocialLobbyInstance")
+            end
+            return r
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- INSTANCE DUMP — once we have it
+-- ═══════════════════════════════════════════════════════════════════
+_G.InstDump = function()
+    local inst = _G._SocialLobbyInstance
+    if not inst then
+        POPUP("NO INSTANCE", "Hook it first, or check instance_hunter.txt")
+        return
+    end
     local out = {}
     local function w(s) out[#out+1] = tostring(s) end
-    w("═══ INSTANCE DUMP (via " .. method .. ") ═══")
+    w("═══ INSTANCE DUMP ═══")
     w("Time: " .. os.date("%Y-%m-%d %H:%M:%S"))
     w("")
-
-    w("═══ ALL FIELDS (deep) ═══")
     local keys = {}
     for k in pairs(inst) do keys[#keys+1] = k end
     table.sort(keys, function(a,b) return tostring(a) < tostring(b) end)
     for _, k in ipairs(keys) do
-        local v = inst[k]
-        w("── " .. tostring(k) .. " (" .. type(v) .. ") ──")
-        w("  " .. V(v, 0, 4))
+        w("── " .. tostring(k) .. " (" .. type(inst[k]) .. ") ──")
+        w("  " .. V(inst[k], 0, 4))
         w("")
     end
-
     local txt = table.concat(out, "\n")
-    local ok = W("instance_full_dump.txt", txt)
-    if ok then POPUP("INSTANCE DUMPED", "instance_full_dump.txt\n" .. #txt .. " bytes\nvia " .. method)
-    else POPUP("FAIL", "Cannot write") end
+    W("instance_full_dump.txt", txt)
+    POPUP("INSTANCE DUMPED", "instance_full_dump.txt")
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- INJECT INTO INSTANCE (only if instance found)
+-- INJECT into _G._SocialLobbyInstance
 -- ═══════════════════════════════════════════════════════════════════
 _G.InstInjectSlots = function()
-    local inst = resolveInstance()
+    local inst = _G._SocialLobbyInstance
     if not inst then
-        POPUP("INJECT", "Instance not found")
+        POPUP("NO INSTANCE", "Run InstanceHunter first, then navigate to profile")
         return
     end
 
@@ -180,19 +301,11 @@ _G.InstInjectSlots = function()
         end
     end)
 
-    -- Init missing data fields on INSTANCE
     for _, tn in ipairs({ "_tOthersSocialDataMap", "_tSocialDataGetTime",
                           "_tSlotTypeMaxCountMap", "_tUCUnlockSlotMaxCount" }) do
-        if inst[tn] == nil then
-            inst[tn] = {}
-            print("[INJ] init inst." .. tn .. " = {}")
-        end
-    end
-    if inst._tWeaponSlotIndex == nil then
-        inst._tWeaponSlotIndex = { [1] = {}, [2] = {} }
+        if inst[tn] == nil then inst[tn] = {} end
     end
 
-    -- Real item pools
     local SLOT_TYPES = { 1, 2, 3, 4, 5, 6, 7, 8 }
     local ITEMS = {
         [1] = { 101001, 101002, 101003, 101004, 101005, 101006 },
@@ -207,15 +320,12 @@ _G.InstInjectSlots = function()
 
     local function mkSlot(st, idx, itemID)
         return {
-            slotType = st, slotTypeID = st, SlotType = st, type = st,
-            index = idx, slotIndex = idx, Index = idx, SlotIndex = idx,
+            slotType = st, slotTypeID = st, type = st,
+            index = idx, slotIndex = idx,
             itemID = itemID, itemId = itemID, ItemID = itemID,
-            resID = itemID, resId = itemID, ResID = itemID,
-            skinID = itemID, skinId = itemID, SkinID = itemID,
-            skin_res_id = itemID, res_id = itemID, resid = itemID,
-            isLock = false, isUnlock = true, isLocked = false, isOwned = true,
-            bIsLock = false, bLock = false, bIsUnlock = true,
-            expire_ts = 0, expire_time = 0, expireTime = 0, isPermanent = true,
+            resID = itemID, resId = itemID, skinID = itemID, skinId = itemID,
+            isLock = false, isUnlock = true, isOwned = true,
+            expire_ts = 0, expireTime = 0, isPermanent = true,
         }
     end
 
@@ -227,7 +337,6 @@ _G.InstInjectSlots = function()
             byType[st][idx] = mkSlot(st, idx, pool[((idx-1) % #pool) + 1])
         end
     end
-
     local flat = {}
     for idx = 1, 20 do
         local st = SLOT_TYPES[((idx-1) % #SLOT_TYPES) + 1]
@@ -236,16 +345,13 @@ _G.InstInjectSlots = function()
     end
 
     local socialData = {
-        uid = uid, UID = uid,
-        slotData = byType, slots = flat, allSlotData = flat,
-        collectHallLevel = 999, hallLevel = 999,
+        uid = uid, slotData = byType, slots = flat,
+        allSlotData = flat, collectHallLevel = 999,
     }
 
-    local keys = { uid, tostring(uid), "self", "me", "current", 0, 1, "" }
-    for _, k in ipairs(keys) do
+    for _, k in ipairs({ uid, "self", "me", "current", 0, 1, "" }) do
         inst._tOthersSocialDataMap[k] = socialData
     end
-
     for _, st in ipairs(SLOT_TYPES) do
         inst._tSlotTypeMaxCountMap[st] = 6
         inst._tUCUnlockSlotMaxCount[st] = 0
@@ -253,37 +359,40 @@ _G.InstInjectSlots = function()
 
     pcall(function()
         if type(inst.SetCurUId) == "function" then inst.SetCurUId(inst, uid) end
-    end)
-    pcall(function()
         if type(inst.on_get_collect_hall_data_rsp) == "function" then
             inst.on_get_collect_hall_data_rsp(inst, socialData)
         end
     end)
 
-    local cnt = 0; for _ in pairs(inst._tOthersSocialDataMap) do cnt = cnt + 1 end
-    POPUP("INJECTED", "Instance patched\nUID: " .. uid .. "\nKeys: " .. cnt)
+    POPUP("INJECTED", "Instance patched!\nUID: " .. uid)
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- AUTO-BOOT
+-- AUTO-BOOT: run hunter + hook
 -- ═══════════════════════════════════════════════════════════════════
 pcall(function()
     local ticker = require("common.time_ticker")
     if ticker and ticker.AddTimerOnce then
         ticker.AddTimerOnce(5.0, function()
+            pcall(_G.InstanceHunter)
+            pcall(_G.HookInstanceCreation)
             pcall(function()
-                local inst, method = resolveInstance()
-                if inst then
-                    POPUP("INSTANCE FOUND", "via: " .. method)
-                    pcall(_G.InstDump)
-                else
-                    POPUP("INSTANCE MISSING", "Check instance_resolve.txt")
+                local t = require("common.time_ticker")
+                if t and t.AddTimerOnce then
+                    t.AddTimerOnce(2.0, function()
+                        POPUP("HUNTER DONE",
+                            "1. instance_hunter.txt saved\n" ..
+                            "2. Creation hook active\n\n" ..
+                            "NOW: Open Profile / Social Lobby\n" ..
+                            "Instance catch hoga automatically\n" ..
+                            "Then: InstInjectSlots()")
+                    end)
                 end
             end)
         end)
     end
 end)
 
-print("[v6] Loaded. Instance resolver will auto-fire in 5s.")
+print("[v7] Hunter loaded. Instance hook will activate in 5s.")
 
 return true
