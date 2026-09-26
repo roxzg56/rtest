@@ -1,7 +1,6 @@
 -- ═══════════════════════════════════════════════════════════════════
--- v26 — McLAREN LEGENDARY DROP
--- Skin 1961014 (McLaren 570S Royal Black) on Coupe RB
--- Trigger: Drop box + parachute + legendary bypass
+-- v28 — McLAREN DROP + DUMPER + TRACE
+-- Base: 902 (Coupe RB) | Skin: 1961014 | Full diagnostic capture
 -- Path: /storage/emulated/0/Android/data/com.pubg.imobile/files/
 -- ═══════════════════════════════════════════════════════════════════
 
@@ -27,44 +26,53 @@ local function P(t, m)
     end)
 end
 
+local function V(v, d, m)
+    d, m = d or 0, m or 3
+    if d > m then return "..." end
+    local t = type(v)
+    if t == "nil" or t == "boolean" or t == "number" then return tostring(v) end
+    if t == "string" then return #v > 80 and ('"'..v:sub(1,77)..'..."') or ('"'..v..'"') end
+    if t == "function" then return "<fn>" end
+    if t == "userdata" then return "<ud>" end
+    if t == "table" then
+        local p, i, n = {}, 0, 0
+        for _ in pairs(v) do n = n + 1 end
+        for k, val in pairs(v) do
+            i = i + 1
+            if i > 15 then p[#p+1] = "...(+"..(n-15)..")"; break end
+            p[#p+1] = tostring(k).."="..V(val,d+1,m)
+        end
+        return "{"..table.concat(p,",").."}"
+    end
+    return "<"..t..">"
+end
+
 -- ═══════════════════════════════════════════════════════════════════
--- CONFIG — McLaren IDs
+-- CONFIG
 -- ═══════════════════════════════════════════════════════════════════
 local CFG = {
-    baseVehicleID  = 961,           -- Coupe RB / McLaren base vehicle
-    skinResID      = 1961014,       -- McLaren 570S Royal Black
-    dropEnabled    = true,          -- trigger drop animation
-    fakeLegendary  = true,          -- force legendary flag
+    baseVehicleID = 902,               -- Coupe RB (CORRECT)
+    skinResID = 1961014,               -- McLaren 570S Royal Black
+    insID = 7247538342442672640,       -- from user dump [902]
+    skinInsID = 7247538342442672654,
 }
 
-S("v26_config.txt",
-    "-- v26 McLaren Config\n" ..
-    "-- Skin: McLaren 570S Royal Black\n" ..
-    "-- Base Vehicle: Coupe RB\n" ..
-    "return {\n" ..
-    "    baseVehicleID = 961,\n" ..
-    "    skinResID     = 1961014,\n" ..
-    "    dropEnabled   = true,\n" ..
-    "    fakeLegendary = true,\n" ..
-    "}\n"
+S("v28_config.txt",
+    "v28 McLaren Config\n" ..
+    "baseVehicleID = " .. CFG.baseVehicleID .. " (Coupe RB)\n" ..
+    "skinResID = " .. CFG.skinResID .. " (McLaren Royal Black)\n" ..
+    "insID = " .. CFG.insID .. "\n" ..
+    "skinInsID = " .. CFG.skinInsID .. "\n"
 )
 
--- Generate InsID for McLaren
-local McLarenInsID = 7656927787236720000 + (961 * 1000) + 1014
--- = 7656927787236720010 + 961014 
--- = ~7656927787237681xxx
-
--- Real known InsID for 961 default is 7247538342442672628
--- Our fake: 7247538342442672628 + (1961014 - 1961001) = +13
-local McLarenFakeInsID = 7247538342442672641
-
 -- ═══════════════════════════════════════════════════════════════════
--- NUCLEAR REVERT
+-- REVERT
 -- ═══════════════════════════════════════════════════════════════════
 local PREFIXES = {
     "__mini11_", "__v12_", "__v13_", "__v14_", "__v15_", "__v16_",
     "__v17_", "__v18_", "__v19_", "__v20_", "__v21_", "__v22_",
-    "__v23_", "__v25_", "__slotv10_", "__pet11_", "__pslotv2_", "__pslot11_",
+    "__v23_", "__v25_", "__v26_", "__v27_",
+    "__slotv10_", "__pet11_", "__pslotv2_", "__pslot11_",
 }
 local reverted = 0
 local function revertModule(mod)
@@ -108,12 +116,359 @@ for _, path in ipairs({
     end)
 end
 
-S("v26_step1.txt", "Reverted: " .. reverted)
+-- ═══════════════════════════════════════════════════════════════════
+-- ⭐ DUMPER 1: Vehicle Mod System — find Grand Debut module
+-- ═══════════════════════════════════════════════════════════════════
+_G.V28_DumpVehicleMod = function()
+    local out = {}
+    local function w(s) out[#out+1] = tostring(s) end
+    w("╔═══════════════════════════════════════════════════════════╗")
+    w("║  VEHICLE MOD / GRAND DEBUT DUMP")
+    w("║  Time: " .. os.date("%Y-%m-%d %H:%M:%S"))
+    w("╚═══════════════════════════════════════════════════════════╝")
+    w("")
+
+    -- 1) Search package.loaded
+    w("═══ package.loaded MODULES (mod/vehicle/debut/collect) ═══")
+    for path, mod in pairs(package.loaded) do
+        if type(path) == "string" and type(mod) == "table" then
+            local lk = path:lower()
+            if lk:find("vehiclemod") or lk:find("granddebut") 
+               or lk:find("collectionreward") or lk:find("vehicledebut")
+               or lk:find("vehiclemode") or lk:find("carmod")
+               or lk:find("modsystem") then
+                w("")
+                w("▶ " .. path)
+                
+                -- Inner impl
+                local inner = mod.__inner_impl
+                if type(inner) == "table" then
+                    local fns, tbls, scals = {}, {}, {}
+                    for k, v in pairs(inner) do
+                        local vt = type(v)
+                        if vt == "function" then 
+                            local info = debug.getinfo(v, "S")
+                            local line = info and info.linedefined or 0
+                            local src = info and (info.short_src or "?") or "?"
+                            fns[#fns+1] = tostring(k) .. " (" .. tostring(line) .. ")"
+                        elseif vt == "table" then
+                            local n = 0; for _ in pairs(v) do n = n + 1 end
+                            tbls[#tbls+1] = tostring(k) .. "(" .. n .. ")"
+                        else
+                            scals[#scals+1] = tostring(k) .. "=" .. V(v, 0, 1)
+                        end
+                    end
+                    table.sort(fns)
+                    table.sort(tbls)
+                    table.sort(scals)
+                    
+                    w("  __inner_impl fns (" .. #fns .. "):")
+                    for _, fn in ipairs(fns) do w("    " .. fn) end
+                    if #tbls > 0 then
+                        w("  __inner_impl tbls (" .. #tbls .. "):")
+                        for _, t in ipairs(tbls) do w("    " .. t) end
+                    end
+                    if #scals > 0 then
+                        w("  __inner_impl scalars:")
+                        for _, s in ipairs(scals) do w("    " .. s) end
+                    end
+                end
+                
+                -- Top-level
+                local topFns = {}
+                for k, v in pairs(mod) do
+                    if type(v) == "function" and type(k) == "string" and not k:match("^__") then
+                        topFns[#topFns+1] = k
+                    end
+                end
+                table.sort(topFns)
+                if #topFns > 0 then
+                    w("  Top fns: " .. table.concat(topFns, ", "))
+                end
+            end
+        end
+    end
+
+    -- 2) LobbyModuleConfig search
+    w("")
+    w("═══ ModuleManager.LobbyModuleConfig (mod/vehicle/debut) ═══")
+    pcall(function()
+        local MM = _G.ModuleManager
+        if MM and MM.LobbyModuleConfig then
+            for key, cfg in pairs(MM.LobbyModuleConfig) do
+                if type(cfg) == "table" and type(cfg.ModuleName) == "string" then
+                    local lk = cfg.ModuleName:lower()
+                    if lk:find("vehiclemod") or lk:find("granddebut")
+                       or lk:find("collection") or lk:find("debut")
+                       or lk:find("carmod") then
+                        w("  " .. tostring(key) .. " = " .. cfg.ModuleName)
+                        -- Try get instance
+                        if type(MM.GetModule) == "function" then
+                            local ok, inst = pcall(MM.GetModule, MM, cfg)
+                            if ok and type(inst) == "table" then
+                                local n = 0; for _ in pairs(inst) do n = n + 1 end
+                                w("    → instance keys: " .. n)
+                                for k, v in pairs(inst) do
+                                    if type(v) == "function" and type(k) == "string" then
+                                        local lk2 = k:lower()
+                                        if lk2:find("debut") or lk2:find("spawn") 
+                                           or lk2:find("drop") or lk2:find("trigger")
+                                           or lk2:find("show") or lk2:find("reward") then
+                                            w("      ⭐ " .. k)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    -- 3) Search all modules for "GrandDebut" string
+    w("")
+    w("═══ Modules with 'Debut' / 'Grand' / 'Drop' in function names ═══")
+    local hits = {}
+    for path, mod in pairs(package.loaded) do
+        if type(path) == "string" and type(mod) == "table" then
+            local inner = mod.__inner_impl or mod
+            if type(inner) == "table" then
+                for k in pairs(inner) do
+                    if type(k) == "string" then
+                        local lk = k:lower()
+                        if lk:find("debut") or lk:find("granddebut") 
+                           or lk:find("dropvehicle") then
+                            hits[#hits+1] = path .. "." .. k
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(hits)
+    for _, h in ipairs(hits) do
+        w("  ⭐ " .. h)
+    end
+
+    -- 4) Vehicle skin table from CDataTable
+    w("")
+    w("═══ CDataTable.VehicleSkin ═══")
+    pcall(function()
+        local t = CDataTable.GetTable("VehicleSkin")
+        if t then
+            local n = 0; for _ in pairs(t) do n = n + 1 end
+            w("  VehicleSkin count: " .. n)
+            -- Show around 1961014
+            for id, row in pairs(t) do
+                local nid = tonumber(id)
+                if nid and nid >= 1961000 and nid <= 1961030 then
+                    w("  [" .. nid .. "] = " .. V(row, 0, 2))
+                end
+            end
+        else
+            w("  VehicleSkin NOT FOUND")
+        end
+    end)
+
+    -- 5) Vehicle table
+    w("")
+    w("═══ CDataTable.Vehicle (around 902) ═══")
+    pcall(function()
+        local t = CDataTable.GetTable("Vehicle")
+        if t then
+            local n = 0; for _ in pairs(t) do n = n + 1 end
+            w("  Vehicle count: " .. n)
+            for id, row in pairs(t) do
+                local nid = tonumber(id)
+                if nid == 902 or nid == 961 then
+                    w("  [" .. nid .. "] = " .. V(row, 0, 3))
+                end
+            end
+        else
+            w("  Vehicle NOT FOUND")
+        end
+    end)
+
+    -- 6) VehicleMod related tables
+    w("")
+    w("═══ CDataTable vehicle mod tables ═══")
+    pcall(function()
+        for _, tn in ipairs({ "VehicleMod", "VehicleModify", "VehicleModSystem", 
+                              "VehicleCollect", "VehicleDebut", "GrandDebut",
+                              "VehicleRim", "VehicleLicense" }) do
+            local t = CDataTable.GetTable(tn)
+            if t then
+                local n = 0; for _ in pairs(t) do n = n + 1 end
+                w("  " .. tn .. " = " .. n .. " entries")
+            end
+        end
+    end)
+
+    local txt = table.concat(out, "\n")
+    S("v28_mod_dump.txt", txt)
+    print(txt)
+    P("V28 MOD DUMP", "Saved: v28_mod_dump.txt\nLines: " .. #out)
+    return txt
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- ⭐ DUMPER 2: Vehicle Data — full state
+-- ═══════════════════════════════════════════════════════════════════
+_G.V28_DumpVehicleData = function()
+    local out = {}
+    local function w(s) out[#out+1] = tostring(s) end
+    w("═══ VEHICLE DATA DUMP ═══")
+    w("Time: " .. os.date("%Y-%m-%d %H:%M:%S"))
+    w("")
+
+    pcall(function()
+        local DM = _G.DataMgr
+        if not DM then w("DataMgr NOT loaded") return end
+
+        w("── DataMgr.roleData.vst_skin ──")
+        w("  = " .. tostring(DM.roleData and DM.roleData.vst_skin))
+        w("")
+
+        w("── DataMgr.VehicleSlotList ──")
+        if type(DM.VehicleSlotList) == "table" then
+            for k, v in pairs(DM.VehicleSlotList) do
+                local cnt = 0
+                if type(v) == "table" then for _ in pairs(v) do cnt = cnt + 1 end end
+                w("  [" .. tostring(k) .. "] = {" .. cnt .. " items} " .. V(v, 0, 3))
+            end
+        end
+        w("")
+
+        w("── DataMgr.vehicleSkinInsIDTable ──")
+        if type(DM.vehicleSkinInsIDTable) == "table" then
+            for k, v in pairs(DM.vehicleSkinInsIDTable) do
+                w("  [" .. tostring(k) .. "] = " .. tostring(v))
+            end
+        end
+        w("")
+
+        w("── DataMgr.defaultVehicleSkinResIDTable ──")
+        if type(DM.defaultVehicleSkinResIDTable) == "table" then
+            for k, v in pairs(DM.defaultVehicleSkinResIDTable) do
+                w("  [" .. tostring(k) .. "] = " .. tostring(v))
+            end
+        end
+    end)
+
+    local txt = table.concat(out, "\n")
+    S("v28_vehicle_data.txt", txt)
+    print(txt)
+    P("V28 VEHICLE DUMP", "Saved: v28_vehicle_data.txt")
+    return txt
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- ⭐ DUMPER 3: RUNTIME TRACE — hook everything relevant
+-- ═══════════════════════════════════════════════════════════════════
+_G._V28_TraceLog = {}
+_G._V28_TraceActive = false
+
+_G.V28_TraceStart = function()
+    if _G._V28_TraceActive then 
+        P("V28", "Trace already active")
+        return 
+    end
+    _G._V28_TraceActive = true
+    _G._V28_TraceLog = {}
+
+    local function log(s)
+        _G._V28_TraceLog[#_G._V28_TraceLog+1] = 
+            string.format("[%s] %s", os.date("%H:%M:%S"), s)
+    end
+
+    log("=== TRACE STARTED ===")
+
+    -- Hook all vehicle-related modules
+    local HOOK_MODULES = {
+        "client.logic.lobby.ThemeVehicleManager",
+        "client.logic.vehicle.VehicleCollectSystem",
+        "client.logic.vehicle.LogicVehicleExtendedFeature",
+        "client.logic.vehicle.LogicVehicleAccessory",
+    }
+
+    for _, path in ipairs(HOOK_MODULES) do
+        pcall(function()
+            local M = require(path)
+            local i = M and M.__inner_impl
+            if type(i) ~= "table" then return end
+            
+            for k, fn in pairs(i) do
+                if type(fn) == "function" and type(k) == "string" then
+                    local lk = k:lower()
+                    if lk:find("show") or lk:find("spawn") or lk:find("create")
+                       or lk:find("preview") or lk:find("change") or lk:find("debut")
+                       or lk:find("drop") or lk:find("vehicle") then
+                        local orig = fn
+                        local fnName = tostring(k)
+                        i[k] = function(self, ...)
+                            local args = {}
+                            for n = 1, math.min(5, select("#", ...)) do
+                                local v = select(n, ...)
+                                if type(v) == "table" then 
+                                    args[#args+1] = "tbl"
+                                else 
+                                    args[#args+1] = tostring(v):sub(1, 30)
+                                end
+                            end
+                            log("CALL " .. path:sub(-40) .. "." .. fnName .. "(" .. 
+                                table.concat(args, ",") .. ")")
+                            local ok, r = pcall(orig, self, ...)
+                            if not ok then
+                                log("  ✗ ERR: " .. tostring(r):sub(1, 200))
+                            elseif r ~= nil then
+                                log("  ↳ RET: " .. V(r, 0, 1))
+                            end
+                            return r
+                        end
+                    end
+                end
+            end
+            log("Hooked: " .. path)
+        end)
+    end
+
+    -- Auto-save every 10 sec
+    pcall(function()
+        local ticker = require("common.time_ticker")
+        if ticker and ticker.AddTimerLoop then
+            ticker.AddTimerLoop(0, function()
+                if _G._V28_TraceActive and #_G._V28_TraceLog > 0 then
+                    S("v28_trace.txt", table.concat(_G._V28_TraceLog, "\n"))
+                end
+            end, -1, 10.0)
+        end
+    end)
+
+    log("=== HOOKS READY ===")
+    P("V28 TRACE", 
+        "Trace active.\n\n" ..
+        "Now:\n" ..
+        "1. Garage kholo\n" ..
+        "2. Coupe RB select karo\n" ..
+        "3. McLaren skin apply karo\n" ..
+        "4. Wait 10 sec\n" ..
+        "5. V28_TraceStop()")
+end
+
+_G.V28_TraceStop = function()
+    _G._V28_TraceActive = false
+    local txt = table.concat(_G._V28_TraceLog or {}, "\n")
+    S("v28_trace.txt", txt)
+    P("V28 TRACE STOPPED", 
+        "Saved: v28_trace.txt\n" ..
+        "Lines: " .. #(_G._V28_TraceLog or {}))
+end
 
 -- ═══════════════════════════════════════════════════════════════════
 -- WRAP HELPER
 -- ═══════════════════════════════════════════════════════════════════
-local PFX = "__v26_"
+local PFX = "__v28_"
 local function wrap(mod, name, wrapper)
     if not mod or type(mod[name]) ~= "function" then return false end
     if not mod[PFX .. name] then mod[PFX .. name] = mod[name] end
@@ -122,68 +477,9 @@ local function wrap(mod, name, wrapper)
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 1: SET VST_SKIN — displayed vehicle
+-- PATCH ThemeVehicleManager
 -- ═══════════════════════════════════════════════════════════════════
-pcall(function()
-    local DM = _G.DataMgr
-    if DM and DM.roleData then
-        DM.roleData.vst_skin = McLarenFakeInsID
-        print("[V26] Set vst_skin = " .. McLarenFakeInsID)
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════════════
--- STEP 2: PATCH VehicleCollectSystem — McLaren in vehicle list
--- ═══════════════════════════════════════════════════════════════════
-local p1 = {}
-pcall(function()
-    local M = require("client.logic.vehicle.VehicleCollectSystem")
-    local i = M and M.__inner_impl
-    if not i then return end
-
-    -- Ensure CollectCarInfo doesn't break
-    if i.CollectCarInfo == nil then i.CollectCarInfo = {} end
-
-    -- Default show vehicle
-    if wrap(i, "GetDefaultShowVehicle", function(orig)
-        return function(self, ...)
-            return CFG.baseVehicleID
-        end
-    end) then p1[#p1+1] = "GetDefaultShowVehicle" end
-
-    -- Preview list include McLaren
-    if wrap(i, "GetPreviewVehicleList", function(orig)
-        return function(self, ...)
-            local r = orig(self, ...) or {}
-            if type(r) ~= "table" then r = {} end
-            table.insert(r, 1, CFG.baseVehicleID)
-            return r
-        end
-    end) then p1[#p1+1] = "GetPreviewVehicleList" end
-
-    -- Owned vehicle num
-    if wrap(i, "GetOwnVehicleNumByType", function(orig)
-        return function(self, ...) return 999 end
-    end) then p1[#p1+1] = "GetOwnVehicleNumByType" end
-
-    -- Unlock everything
-    if wrap(i, "HasUnLockFeature", function(orig)
-        return function(self, ...) return true end
-    end) then p1[#p1+1] = "HasUnLockFeature" end
-
-    if wrap(i, "HasUnlockFeature2", function(orig)
-        return function(self, ...) return true end
-    end) then p1[#p1+1] = "HasUnlockFeature2" end
-
-    if wrap(i, "IsOpenHighTire", function(orig)
-        return function(self, ...) return true end
-    end) then p1[#p1+1] = "IsOpenHighTire" end
-end)
-
--- ═══════════════════════════════════════════════════════════════════
--- STEP 3: PATCH ThemeVehicleManager — FORCE McLaren spawn
--- ═══════════════════════════════════════════════════════════════════
-local p2 = {}
+local patched = 0
 pcall(function()
     local M = require("client.logic.lobby.ThemeVehicleManager")
     local i = M and M.__inner_impl
@@ -191,101 +487,46 @@ pcall(function()
 
     if i.Vehicles == nil then i.Vehicles = {} end
 
-    -- ═══ Ownership checks → true ═══
     if wrap(i, "CheckVehicleTypeHasUnlock", function(orig)
         return function(self, ...) return true end
-    end) then p2[#p2+1] = "CheckVehicleTypeHasUnlock" end
+    end) then patched = patched + 1 end
 
     if wrap(i, "HaveEnoughVehicleShowSpecial", function(orig)
         return function(self, ...) return true end
-    end) then p2[#p2+1] = "HaveEnoughVehicleShowSpecial" end
+    end) then patched = patched + 1 end
 
     if wrap(i, "NeedShowSpecialThemeEffect", function(orig)
         return function(self, ...) return true end
-    end) then p2[#p2+1] = "NeedShowSpecialThemeEffect" end
+    end) then patched = patched + 1 end
 
-    -- ═══ Vehicle list → our McLaren ═══
+    if wrap(i, "GetValidVehicleNum", function(orig)
+        return function(self, ...) return 999 end
+    end) then patched = patched + 1 end
+
     if wrap(i, "GetSelfVehicleIDs", function(orig)
         return function(self, ...)
             local r = orig(self, ...)
             if type(r) == "table" and next(r) then
-                -- Include McLaren
                 table.insert(r, 1, CFG.baseVehicleID)
                 return r
             end
             return { CFG.baseVehicleID }
         end
-    end) then p2[#p2+1] = "GetSelfVehicleIDs" end
+    end) then patched = patched + 1 end
 
-    -- ═══ ShowThemeVehicle — FORCE McLaren ═══
     if wrap(i, "ShowThemeVehicle", function(orig)
-        return function(self, vehicleID, ...)
-            print("[V26] ShowThemeVehicle intercepted: " .. tostring(vehicleID))
-            -- Force our config
-            local ok = pcall(orig, self, CFG.baseVehicleID, ...)
-            if not ok then
-                pcall(orig, self, CFG.baseVehicleID)
-            end
-            return true
+        return function(self, ...)
+            local ok = pcall(orig, self, CFG.baseVehicleID)
+            return ok
         end
-    end) then p2[#p2+1] = "ShowThemeVehicle" end
+    end) then patched = patched + 1 end
 
-    -- ═══ _ShowSelfVehicle — with CORRECT args ═══
-    -- Error tha: ERR: .\client\logic\lobby\ThemeVehicleManager...
-    -- Isse pata chalta hai args maang raha hai
     if wrap(i, "_ShowSelfVehicle", function(orig)
         return function(self, ...)
-            print("[V26] _ShowSelfVehicle intercepted")
-            -- Try multiple arg styles
             local tries = {
+                function() return orig(self, CFG.baseVehicleID, CFG.skinInsID) end,
+                function() return orig(self, CFG.baseVehicleID, CFG.insID) end,
                 function() return orig(self, CFG.baseVehicleID) end,
-                function() return orig(self, CFG.baseVehicleID, McLarenFakeInsID) end,
-                function() return orig(self, CFG.baseVehicleID, CFG.skinResID) end,
-                function() return orig(self, {VehicleID = CFG.baseVehicleID, InsID = McLarenFakeInsID}) end,
-                function() return orig(self, McLarenFakeInsID) end,
-                function() return orig(self) end,  -- no args
-            }
-            for idx, fn in ipairs(tries) do
-                local ok, err = pcall(fn)
-                if ok then
-                    print("[V26] _ShowSelfVehicle OK with arg style #" .. idx)
-                    return true
-                end
-            end
-            print("[V26] _ShowSelfVehicle all args failed")
-            return false
-        end
-    end) then p2[#p2+1] = "_ShowSelfVehicle" end
-
-    -- ═══ _CreateVehicleModel — with multiple arg styles ═══
-    if wrap(i, "_CreateVehicleModel", function(orig)
-        return function(self, ...)
-            print("[V26] _CreateVehicleModel intercepted")
-            local tries = {
-                function() return orig(self, CFG.baseVehicleID) end,
-                function() return orig(self, CFG.baseVehicleID, McLarenFakeInsID) end,
-                function() return orig(self, CFG.baseVehicleID, CFG.skinResID) end,
-                function() return orig(self, {VehicleID = CFG.baseVehicleID, InsID = McLarenFakeInsID}) end,
-                function() return orig(self, McLarenFakeInsID) end,
-                function() return orig(self) end,
-            }
-            for idx, fn in ipairs(tries) do
-                local ok, err = pcall(fn)
-                if ok then
-                    print("[V26] _CreateVehicleModel OK with arg style #" .. idx)
-                    return true
-                end
-            end
-            return false
-        end
-    end) then p2[#p2+1] = "_CreateVehicleModel" end
-
-    -- ═══ _TryCreateVehicleModel ═══
-    if wrap(i, "_TryCreateVehicleModel", function(orig)
-        return function(self, ...)
-            local tries = {
-                function() return orig(self, CFG.baseVehicleID) end,
-                function() return orig(self, CFG.baseVehicleID, McLarenFakeInsID) end,
                 function() return orig(self) end,
             }
             for _, fn in ipairs(tries) do
@@ -293,125 +534,103 @@ pcall(function()
             end
             return false
         end
-    end) then p2[#p2+1] = "_TryCreateVehicleModel" end
+    end) then patched = patched + 1 end
 
-    -- ═══ PreviewGarageVehicle — force McLaren ═══
+    if wrap(i, "_CreateVehicleModel", function(orig)
+        return function(self, ...)
+            local tries = {
+                function() return orig(self, CFG.baseVehicleID, CFG.skinInsID) end,
+                function() return orig(self, CFG.baseVehicleID) end,
+                function() return orig(self) end,
+            }
+            for _, fn in ipairs(tries) do
+                if pcall(fn) then return true end
+            end
+            return false
+        end
+    end) then patched = patched + 1 end
+
     if wrap(i, "PreviewGarageVehicle", function(orig)
         return function(self, vehicleID, ...)
             return orig(self, CFG.baseVehicleID, ...)
         end
-    end) then p2[#p2+1] = "PreviewGarageVehicle" end
+    end) then patched = patched + 1 end
 
-    -- ═══ OnVehicleChange — force McLaren ═══
     if wrap(i, "OnVehicleChange", function(orig)
         return function(self, vehicleID, ...)
             return orig(self, CFG.baseVehicleID, ...)
         end
-    end) then p2[#p2+1] = "OnVehicleChange" end
+    end) then patched = patched + 1 end
 
-    -- ═══ OnGarageVehicleChange — force McLaren ═══
     if wrap(i, "OnGarageVehicleChange", function(orig)
         return function(self, vehicleID, ...)
             return orig(self, CFG.baseVehicleID, ...)
         end
-    end) then p2[#p2+1] = "OnGarageVehicleChange" end
-
-    -- ═══ GetValidVehicleNum ═══
-    if wrap(i, "GetValidVehicleNum", function(orig)
-        return function(self, ...) return 999 end
-    end) then p2[#p2+1] = "GetValidVehicleNum" end
+    end) then patched = patched + 1 end
 end)
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 4: FAKE OWNERSHIP via skin data
+-- SET vst_skin
 -- ═══════════════════════════════════════════════════════════════════
-local p3 = {}
+pcall(function()
+    local DM = _G.DataMgr
+    if DM and DM.roleData then
+        DM.roleData.vst_skin = CFG.insID
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════
+-- FAKE DataMgr data
+-- ═══════════════════════════════════════════════════════════════════
 pcall(function()
     local DM = _G.DataMgr
     if not DM then return end
-    
-    -- Fake vehicle skin ownership
+
     if type(DM.vehicleSkinInsIDTable) == "table" then
-        DM.vehicleSkinInsIDTable[961] = McLarenFakeInsID
-        p3[#p3+1] = "vehicleSkinInsIDTable[961]"
+        DM.vehicleSkinInsIDTable[902] = CFG.insID
+        DM.vehicleSkinInsIDTable[961] = CFG.skinInsID
     end
-    
-    -- Add McLaren to VehicleSlotList
+
     if type(DM.VehicleSlotList) == "table" then
-        DM.VehicleSlotList[961] = DM.VehicleSlotList[961] or {}
-        DM.VehicleSlotList[961][1] = McLarenFakeInsID
-        p3[#p3+1] = "VehicleSlotList[961]"
+        DM.VehicleSlotList[902] = { [1] = CFG.insID }
+        DM.VehicleSlotList[961] = { [1] = CFG.skinInsID }
     end
-    
-    -- Ensure defaultVehicleSkinResIDTable has McLaren
+
     if type(DM.defaultVehicleSkinResIDTable) == "table" then
-        DM.defaultVehicleSkinResIDTable[961] = CFG.skinResID
-        p3[#p3+1] = "defaultVehicleSkinResIDTable[961]"
+        DM.defaultVehicleSkinResIDTable[902] = 1961001
+        DM.defaultVehicleSkinResIDTable[961] = 1961001
     end
 end)
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 5: PATCH OTHER MODULES — remove blocks
+-- MANUAL SPAWN
 -- ═══════════════════════════════════════════════════════════════════
-local p4 = {}
-pcall(function()
-    local M = require("client.logic.vehicle.LogicVehicleAccessory")
-    local i = M and M.__inner_impl
-    if i then
-        if wrap(i, "CheckVehicleCanEquipAccessory", function(orig)
-            return function(self, ...) return true end
-        end) then p4[#p4+1] = "VAC:CanEquip" end
-        
-        if wrap(i, "CheckHasGetVehicle", function(orig)
-            return function(self, ...) return true end
-        end) then p4[#p4+1] = "VAC:HasGetVehicle" end
-    end
-end)
-
-pcall(function()
-    local M = require("client.logic.vehicle.LogicVehicleExtendedFeature")
-    local i = M and M.__inner_impl
-    if i then
-        if wrap(i, "CheckVehicleSupportMultiSlot", function(orig)
-            return function(self, ...) return true end
-        end) then p4[#p4+1] = "VEF:SupportMultiSlot" end
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════════════
--- STEP 6: MANUAL TRIGGER — _G.V26_Spawn()
--- ═══════════════════════════════════════════════════════════════════
-_G.V26_Spawn = function()
+_G.V28_Spawn = function()
     local results = {}
     
-    -- 1. Set vst_skin again
     pcall(function()
         local DM = _G.DataMgr
         if DM and DM.roleData then
-            DM.roleData.vst_skin = McLarenFakeInsID
-            results[#results+1] = "✓ vst_skin = " .. McLarenFakeInsID
+            DM.roleData.vst_skin = CFG.insID
+            results[#results+1] = "✓ vst_skin set"
         end
     end)
     
-    -- 2. Trigger ThemeVehicleManager
     pcall(function()
         local M = require("client.logic.lobby.ThemeVehicleManager")
         local i = M and M.__inner_impl
         if not i then results[#results+1] = "✗ TVM not loaded" return end
         
-        -- Try ShowThemeVehicle with McLaren base
         if type(i.ShowThemeVehicle) == "function" then
             local ok = pcall(i.ShowThemeVehicle, i, CFG.baseVehicleID)
-            results[#results+1] = "ShowThemeVehicle(" .. CFG.baseVehicleID .. ") = " .. (ok and "OK" or "ERR")
+            results[#results+1] = "ShowThemeVehicle(902): " .. (ok and "OK" or "ERR")
         end
         
-        -- Try _ShowSelfVehicle with multiple args
         if type(i._ShowSelfVehicle) == "function" then
-            local ok = pcall(i._ShowSelfVehicle, i, CFG.baseVehicleID, McLarenFakeInsID)
-            results[#results+1] = "_ShowSelfVehicle = " .. (ok and "OK" or "ERR")
+            local ok = pcall(i._ShowSelfVehicle, i, CFG.baseVehicleID, CFG.insID)
+            results[#results+1] = "_ShowSelfVehicle: " .. (ok and "OK" or "ERR")
         end
         
-        -- Refresh effects
         if type(i.RefreshSpecialEffect) == "function" then
             pcall(i.RefreshSpecialEffect, i)
             results[#results+1] = "✓ RefreshSpecialEffect"
@@ -429,90 +648,63 @@ _G.V26_Spawn = function()
     end)
     
     local txt = table.concat(results, "\n")
-    S("v26_spawn.txt", txt)
-    P("V26 SPAWN", txt)
+    S("v28_spawn.txt", txt)
+    P("V28 SPAWN", txt)
     return txt
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 7: AUTO-SPAWN on lobby enter
+-- AUTO-BOOT SEQUENCE
 -- ═══════════════════════════════════════════════════════════════════
-pcall(function()
-    local ticker = require("common.time_ticker")
-    if ticker and ticker.AddTimerLoop then
-        ticker.AddTimerLoop(0, function()
-            pcall(function()
-                local inLobby = false
-                if GameStatus and GameStatus.IsInLobbyOrMainCity then
-                    inLobby = GameStatus.IsInLobbyOrMainCity()
-                end
-                if inLobby then
-                    local DM = _G.DataMgr
-                    if DM and DM.roleData and DM.roleData.vst_skin ~= McLarenFakeInsID then
-                        DM.roleData.vst_skin = McLarenFakeInsID
-                    end
-                end
-            end)
-        end, -1, 5.0)
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════════════
--- STEP 8: EVENT HOOK — lobby enter
--- ═══════════════════════════════════════════════════════════════════
-pcall(function()
-    if EventSystem and EventSystem.registEvent then
-        if EVENTTYPE_LOBBY and EVENTID_SHOW_LOBBY then
-            EventSystem:registEvent(EVENTTYPE_LOBBY, EVENTID_SHOW_LOBBY, function()
-                pcall(function()
-                    local t = require("common.time_ticker")
-                    if t and t.AddTimerOnce then
-                        t.AddTimerOnce(2.0, V26_Spawn)
-                    end
-                end)
-            end)
-        end
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════════════
--- REPORT
--- ═══════════════════════════════════════════════════════════════════
-local total = #p1 + #p2 + #p3 + #p4
-
-S("v26_report.txt",
-    "v26 McLAREN DROP REPORT\n" ..
-    "Time: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n" ..
-    "Reverted: " .. reverted .. "\n" ..
-    "Base Vehicle: " .. CFG.baseVehicleID .. " (Coupe RB)\n" ..
-    "Skin: " .. CFG.skinResID .. " (McLaren Royal Black)\n" ..
-    "Fake InsID: " .. McLarenFakeInsID .. "\n" ..
-    "Patches:\n" ..
-    "  VehicleCollectSystem: " .. #p1 .. "\n" ..
-    "  ThemeVehicleManager: " .. #p2 .. "\n" ..
-    "  DataMgr fake data: " .. #p3 .. "\n" ..
-    "  Other modules: " .. #p4 .. "\n" ..
-    "  TOTAL: " .. total .. "\n\n" ..
-    "Commands:\n" ..
-    "  V26_Spawn()  -- manual trigger McLaren drop\n"
-)
-
--- Auto-trigger after 5 sec
 pcall(function()
     local ticker = require("common.time_ticker")
     if ticker and ticker.AddTimerOnce then
+        -- 3 sec: dump mod system
+        ticker.AddTimerOnce(3.0, function()
+            pcall(_G.V28_DumpVehicleMod)
+        end)
+        -- 5 sec: dump vehicle data
         ticker.AddTimerOnce(5.0, function()
-            V26_Spawn()
+            pcall(_G.V28_DumpVehicleData)
+        end)
+        -- 7 sec: start trace
+        ticker.AddTimerOnce(7.0, function()
+            pcall(_G.V28_TraceStart)
+        end)
+        -- 8 sec: manual spawn try
+        ticker.AddTimerOnce(8.0, function()
+            pcall(_G.V28_Spawn)
         end)
     end
 end)
 
-P("v26 LOADED",
-    "McLaren Drop Setup\n\n" ..
-    "Base: Coupe RB (961)\n" ..
-    "Skin: 1961014\n" ..
-    "Fake InsID: " .. McLarenFakeInsID .. "\n\n" ..
-    "5 sec mein auto-spawn try hoga.\n" ..
-    "Ya manually: V26_Spawn()")
+-- Report
+S("v28_report.txt",
+    "v28 REPORT\n" ..
+    "Time: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n" ..
+    "Reverted: " .. reverted .. "\n" ..
+    "Base Vehicle: 902 (Coupe RB)\n" ..
+    "Skin: 1961014 (McLaren)\n" ..
+    "InsID: " .. CFG.insID .. "\n" ..
+    "Patched: " .. patched .. "\n\n" ..
+    "Commands:\n" ..
+    "  V28_DumpVehicleMod()  -- find mod module\n" ..
+    "  V28_DumpVehicleData() -- dump vehicle state\n" ..
+    "  V28_TraceStart()      -- trace calls\n" ..
+    "  V28_TraceStop()       -- stop + save\n" ..
+    "  V28_Spawn()           -- manual spawn\n"
+)
+
+P("v28 LOADED",
+    "McLaren + Full Dumper\n\n" ..
+    "Auto-run:\n" ..
+    "  3s → Mod dump\n" ..
+    "  5s → Vehicle data dump\n" ..
+    "  7s → Trace start\n" ..
+    "  8s → Spawn try\n\n" ..
+    "Garage kholo Coupe RB select karo.\n" ..
+    "10 sec baad: V28_TraceStop()")
+
+print("[V28] Loaded. Full dumper + trace active.")
 
 return true
