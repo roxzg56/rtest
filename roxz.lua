@@ -1,400 +1,410 @@
 -- ═══════════════════════════════════════════════════════════════════
--- PSLOT + CAR FIX v2 — Real Structure Based
+-- PATH-FIXED READER + TRACER + INJECT v3.1
+-- All output goes to: /storage/emulated/0/Android/data/com.pubg.imobile/files/
 -- ═══════════════════════════════════════════════════════════════════
 
-_G.DX_Settings = _G.DX_Settings or {}
-_G.DX_Settings.FixSlotsV2 = _G.DX_Settings.FixSlotsV2 ~= false
-_G.DX_Settings.FixCarV2 = _G.DX_Settings.FixCarV2 ~= false
+local DUMP_DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
 
--- ─── REAL ITEM IDs (from your CDataTable[Item] + vehicle types) ───
--- Vehicle TYPES (base) — these are real, seen in VehicleSlotList
-local VEHICLE_TYPES = {
-    901, 902, 903, 904, 905, 906, 907, 908, 910, 911, 912, 913,
-    915, 916, 917, 918, 919, 920, 930, 953, 960, 961, 963, 966,
-    -- UAZ=904, Dacia=903, Buggy=905, Mirado=906, etc.
-}
-
--- Vehicle SKIN resIDs (from defaultVehicleSkinResIDTable)
-local VEHICLE_SKINS = {
-    1901001, 1902001, 1903001, 1904001, 1905001, 1906001, 1907001,
-    1908001, 1909001, 1910001, 1911001, 1912001, 1913001, 1914001,
-    1915001, 1916001, 1917001, 1918001, 1919001, 1920001,
-    1930001, 1953001, 1960001, 1961001, 1963001, 1966001, 1967001,
-}
-
--- Weapon IDs — from Item table range, sample verified IDs
--- Base weapons in PUBGM: 101xxx (AR), 102xxx (SR), 103xxx (DMR),
--- 104xxx (LMG), 105xxx (SMG), 106xxx (SG), 107xxx (Pistol), 108xxx (Melee)
-local WEAPONS = {
-    -- AR
-    101001, 101002, 101003, 101004, 101005, 101006, 101007, 101008,
-    101009, 101010, 101011, 101012, 101013, 101014,
-    -- SR
-    103001, 103002, 103003, 103004, 103005, 103006, 103007,
-    -- DMR
-    103008, 103009, 103010, 103011, 103012, 103013,
-    -- SMG
-    102001, 102002, 102003, 102004, 102005, 102006, 102007,
-    -- LMG
-    104001, 104002, 104003,
-    -- Shotgun
-    105001, 105002, 105003, 105004, 105005,
-    -- Pistol
-    106001, 106002, 106003, 106004, 106005, 106006, 106007, 106008,
-    -- Melee
-    108001, 108002, 108003, 108004,
-}
-
-local PETS = {
-    50000, 50003, 50004, 50005, 50006, 50007, 50008, 50009, 50010,
-    50011, 50012, 50013, 50014, 50015, 50016, 50017, 50018, 50019,
-    50020, 50021, 50022, 50023, 50024, 50025, 50026, 50027, 50028,
-    50029, 50030, 50031, 50032, 50033, 50034, 50035, 50036, 50037,
-    50038, 50039, 50040, 50041, 50042, 50043, 50044, 50045, 50046,
-    50047, 50048,
-}
-
-local AVATARS = {
-    10008, 10010, 10011, 20010, 20011, 20012, 20013, 20014, 20015,
-    20016, 20017, 50002, 401985, 40601002,
-}
-
--- ─── RANDOM PICKER ─────────────────────────────────────────────────
-local function pick(pool, key)
-    if not pool or #pool == 0 then return nil end
-    local seed = (_G.DX_Settings.ProfileSlotSeed or os.time()) + (key or 0)
-    return pool[(seed % #pool) + 1]
-end
-
--- ─── FAKE SLOT DATA BUILDER ────────────────────────────────────────
-local function makeSlot(slotType, index, itemID)
-    return {
-        slotType    = slotType,
-        SlotType    = slotType,
-        slotTypeID  = slotType,
-        index       = index,
-        Index       = index,
-        slotIndex   = index,
-        SlotIndex   = index,
-        itemID      = itemID,
-        itemId      = itemID,
-        ItemID      = itemID,
-        resID       = itemID,
-        resId       = itemID,
-        ResID       = itemID,
-        skinID      = itemID,
-        skinId      = itemID,
-        SkinID      = itemID,
-        isLock      = false,
-        isUnlock    = true,
-        isOwned     = true,
-        expire_ts   = 0,
-        expireTime  = 0,
-        isPermanent = true,
-    }
-end
-
--- ─── WRAP HELPER ───────────────────────────────────────────────────
-local PFX = "__pslotv2_"
-local function wrapFn(tbl, name, wrapper)
-    if not tbl or type(tbl[name]) ~= "function" then return false end
-    if not tbl[PFX .. name] then
-        tbl[PFX .. name] = tbl[name]
-    end
-    tbl[name] = wrapper(tbl[PFX .. name])
-    return true
-end
-
--- ═══════════════════════════════════════════════════════════════════
--- MAIN INSTALLER
--- ═══════════════════════════════════════════════════════════════════
-_G.PSlotFixV2_Install = function()
-
-    if _G._PSlotFixV2_Installed then return true end
-    _G._PSlotFixV2_Installed = true
-
-    local MyUID = nil
+-- ─── FILE WRITE HELPER ─────────────────────────────────────────────
+local function writeDump(name, content)
+    local ok = false
     pcall(function()
-        if _G.DataMgr and _G.DataMgr.roleData then
-            MyUID = tostring(_G.DataMgr.roleData.uid or "")
+        local f = io.open(DUMP_DIR .. name, "w")
+        if f then
+            f:write(content or "")
+            f:close()
+            ok = true
+            print("[DUMP] wrote " .. DUMP_DIR .. name)
         end
     end)
+    return ok
+end
 
-    -- ═══════════════════════════════════════════════════════════════
-    -- 1) LOGIC_SOCIAL_LOBBY_MODULE — FIX _tOthersSocialDataMap
-    -- ═══════════════════════════════════════════════════════════════
-    pcall(function()
-        local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
-        if type(M) ~= "table" then return end
-        local i = M.__inner_impl
-        if type(i) ~= "table" then return end
-
-        -- FIX 1a: Initialize the missing table
-        if i._tOthersSocialDataMap == nil then
-            i._tOthersSocialDataMap = {}
-        end
-        if i._tSocialDataGetTime == nil then
-            i._tSocialDataGetTime = {}
-        end
-        if i._tSlotTypeMaxCountMap == nil then
-            i._tSlotTypeMaxCountMap = {}
-        end
-        if i._tUCUnlockSlotMaxCount == nil then
-            i._tUCUnlockSlotMaxCount = {}
-        end
-        if i._tWeaponSlotIndex == nil then
-            i._tWeaponSlotIndex = { [1] = {}, [2] = {} }
-        end
-
-        -- FIX 1b: Set current UID if not set
-        if type(i.SetCurUId) == "function" then
-            pcall(i.SetCurUId, i, MyUID)
-        end
-        if type(i.GetCurUId) == "function" then
-            local ok, cur = pcall(i.GetCurUId, i)
-            if not ok or not cur then
-                -- Patch GetCurUId to always return MyUID
-                wrapFn(i, "GetCurUId", function()
-                    return function() return MyUID end
-                end)
-            end
-        end
-
-        -- FIX 1c: GetSlotDataBySlotTypeAndIndex — safe wrapper
-        wrapFn(i, "GetSlotDataBySlotTypeAndIndex", function(orig)
-            return function(self, slotType, index, ...)
-                -- Ensure table exists before call
-                if self._tOthersSocialDataMap == nil then
-                    self._tOthersSocialDataMap = {}
+-- ─── SOURCE READER (source files bhi us path se) ───────────────────
+_G.ReadSourceFile = function(relPath, lineStart, lineEnd)
+    -- Clean path
+    local clean = relPath:gsub("^@", ""):gsub("^%.\\", ""):gsub("^%.%/", ""):gsub("\\", "/")
+    
+    local roots = {
+        DUMP_DIR,                              -- primary
+        DUMP_DIR .. "Script/",
+        DUMP_DIR .. "UE4Game/ShadowTrackerExtra/ShadowTrackerExtra/Saved/Paks/",
+        "/sdcard/",
+    }
+    
+    for _, root in ipairs(roots) do
+        local f = io.open(root .. clean, "r")
+        if f then
+            local content = f:read("*a")
+            f:close()
+            if lineStart and lineEnd then
+                local lines = {}
+                local i = 0
+                for line in content:gmatch("[^\n]*") do
+                    i = i + 1
+                    if i >= lineStart and i <= lineEnd then
+                        lines[#lines+1] = string.format("%4d | %s", i, line)
+                    end
+                    if i > lineEnd then break end
                 end
-                local ok, r = pcall(orig, self, slotType, index, ...)
-                if ok and r and type(r) == "table" then
-                    -- Check if has content
-                    for _ in pairs(r) do return r end
+                return table.concat(lines, "\n"), root .. clean
+            end
+            return content, root .. clean
+        end
+    end
+    return nil, nil
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 1: SLOT SOURCE READER
+-- ═══════════════════════════════════════════════════════════════════
+_G.SlotSourceRead = function()
+    local out = {}
+    local function w(s) out[#out+1] = tostring(s) end
+    w("═══ SLOT SOURCE READ — " .. os.date("%Y-%m-%d %H:%M:%S") .. " ═══")
+    w("Dump dir: " .. DUMP_DIR)
+    w("")
+
+    local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
+    if type(M) ~= "table" then w("MODULE NOT LOADED"); writeDump("slot_source.txt", table.concat(out, "\n")); return end
+    local i = M.__inner_impl
+    if type(i) ~= "table" then w("INNER NOT LOADED"); writeDump("slot_source.txt", table.concat(out, "\n")); return end
+
+    local function dumpFn(fnName)
+        local fn = i[fnName]
+        if type(fn) ~= "function" then
+            w("")
+            w("── " .. fnName .. " : NOT A FUNCTION ──")
+            return
+        end
+        local info = debug.getinfo(fn, "S")
+        if not info then
+            w("")
+            w("── " .. fnName .. " : NO INFO ──")
+            return
+        end
+        w("")
+        w("══════════════════════════════════════════════")
+        w("FUNCTION: " .. fnName)
+        w("  source      = " .. tostring(info.source))
+        w("  short_src   = " .. tostring(info.short_src))
+        w("  linedefined = " .. tostring(info.linedefined))
+        w("  lastdefined = " .. tostring(info.lastlinedefined))
+        w("══════════════════════════════════════════════")
+
+        -- Read the file
+        local src, realPath = _G.ReadSourceFile(info.short_src or info.source)
+        if src then
+            w("  FILE: " .. realPath .. " (" .. #src .. " bytes)")
+            w("")
+            -- Full function body
+            local i3 = 0
+            for line in src:gmatch("[^\n]*") do
+                i3 = i3 + 1
+                if i3 >= info.linedefined and i3 <= info.lastdefined then
+                    w(string.format("%4d | %s", i3, line))
                 end
-                -- Empty — return fake data
-                local stLower = type(slotType) == "string" and slotType:lower() or ""
-                local stNum = tonumber(slotType) or 0
-                local itemID
-                if stLower:find("weapon") or stLower:find("gun") or stNum == 1 then
-                    itemID = pick(WEAPONS, index)
-                elseif stLower:find("vehicle") or stLower:find("car") or stNum == 2 then
-                    itemID = pick(VEHICLE_TYPES, index)
-                elseif stLower:find("pet") or stNum == 3 then
-                    itemID = pick(PETS, index)
-                elseif stLower:find("avatar") or stLower:find("show") or stNum == 4 then
-                    itemID = pick(AVATARS, index)
-                elseif stLower:find("bg") or stLower:find("wall") or stNum == 5 then
-                    itemID = pick(AVATARS, index)
-                elseif stLower:find("achievement") or stNum == 6 then
-                    itemID = pick(AVATARS, index)
-                else
-                    itemID = pick(WEAPONS, index)
-                end
-                return makeSlot(slotType, index, itemID)
+                if i3 > info.lastdefined then break end
             end
-        end)
+        else
+            w("  FILE NOT READABLE at any root")
+        end
+    end
 
-        -- FIX 1d: Slot max count
-        wrapFn(i, "GetSlotTypeMaxCount", function(orig)
-            return function(self, slotType, ...)
-                local ok, r = pcall(orig, self, slotType, ...)
-                if ok and type(r) == "number" and r > 0 then return r end
-                return 6  -- 6 slots max
-            end
-        end)
+    -- Key functions to dump
+    local funcs = {
+        "GetSlotDataBySlotTypeAndIndex",
+        "GetSlotTypeMaxCount",
+        "GetSlotTypeUCUnlockMaxCount",
+        "GetSlotIsUnlockedByCollectHallLevel",
+        "GetCollectHallLevel",
+        "SetCurUId",
+        "GetCurUId",
+        "on_get_collect_hall_data_rsp",
+        "PetSlotEquipClotheItemId",
+        "BGWallSlotEquipItemId",
+        "AvatarShowSlotEquipItemId",
+        "AchievementSlotEquipItemId",
+        "SetCreateModelIndex",
+        "GetCreateModelIndex",
+    }
 
-        -- FIX 1e: Slot unlock — always true
-        wrapFn(i, "GetSlotIsUnlockedByCollectHallLevel", function(orig)
-            return function(self, slotType, index, ...)
-                return true
-            end
-        end)
+    for _, fn in ipairs(funcs) do
+        pcall(dumpFn, fn)
+    end
 
-        -- FIX 1f: Equip functions — accept
-        wrapFn(i, "PetSlotEquipClotheItemId", function() return function() return true end end)
-        wrapFn(i, "BGWallSlotEquipItemId", function() return function() return true end end)
-        wrapFn(i, "AvatarShowSlotEquipItemId", function() return function() return true end end)
-        wrapFn(i, "AchievementSlotEquipItemId", function() return function() return true end end)
+    -- Also dump the module structure
+    w("")
+    w("")
+    w("═══ MODULE FIELD INVENTORY ═══")
+    for k, v in pairs(i) do
+        local vt = type(v)
+        if vt == "table" then
+            local n = 0; for _ in pairs(v) do n = n + 1 end
+            w(string.format("  [table:%d] %s", n, tostring(k)))
+        elseif vt == "function" then
+            local info = debug.getinfo(v, "S")
+            local line = info and info.linedefined or "?"
+            local src = info and (info.short_src or "?") or "?"
+            w(string.format("  [fn] %s (line %s in %s)", tostring(k), tostring(line), tostring(src)))
+        else
+            w(string.format("  [%s] %s = %s", vt, tostring(k), tostring(v)))
+        end
+    end
 
-        -- FIX 1g: on_get_collect_hall_data_rsp — inject fake slot data
-        wrapFn(i, "on_get_collect_hall_data_rsp", function(orig)
-            return function(self, data, ...)
-                if type(data) == "table" then
-                    data.slotData = data.slotData or {}
-                    data.allSlotData = data.allSlotData or {}
-                    data.slots = data.slots or {}
-                    -- Seed slot data
-                    for idx = 1, 6 do
-                        if not data.slotData[idx] then
-                            data.slotData[idx] = makeSlot("Weapon", idx, pick(WEAPONS, idx))
-                        end
-                        if not data.slots[idx] then
-                            data.slots[idx] = makeSlot("Weapon", idx, pick(WEAPONS, idx))
-                        end
+    local txt = table.concat(out, "\n")
+    writeDump("slot_source.txt", txt)
+    print(txt)
+    return txt
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 2: TRACER
+-- ═══════════════════════════════════════════════════════════════════
+_G.TraceSlots = function()
+    local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
+    if type(M) ~= "table" then print("[TRACE] Module not loaded") return end
+    local i = M.__inner_impl
+    if type(i) ~= "table" then print("[TRACE] Inner not loaded") return end
+
+    if _G._SlotTraceActive then
+        print("[TRACE] Already active")
+        return
+    end
+    _G._SlotTraceActive = true
+    _G._SlotTraceLog = {}
+    _G._SlotTraceStart = os.time()
+
+    local function log(line)
+        _G._SlotTraceLog[#_G._SlotTraceLog+1] = 
+            string.format("[%s] %s", os.date("%H:%M:%S"), line)
+    end
+
+    log("=== TRACE STARTED ===")
+
+    for name, fn in pairs(i) do
+        if type(fn) == "function" and type(name) == "string" 
+           and not name:match("^__") and not name:match("^_t") then
+            local orig = fn
+            i[name] = function(self, ...)
+                local args = {}
+                for n = 1, math.min(3, select("#", ...)) do
+                    local v = select(n, ...)
+                    if type(v) == "table" then
+                        args[#args+1] = "tbl"
+                    else
+                        args[#args+1] = tostring(v)
                     end
                 end
-                -- Ensure internal table
-                if self._tOthersSocialDataMap == nil then
-                    self._tOthersSocialDataMap = {}
-                end
-                local ok, err = pcall(orig, self, data, ...)
-                return ok, err
-            end
-        end)
-
-        print("[PSLOTV2] Logic_SocialLobbyModule fixed")
-    end)
-
-    -- ═══════════════════════════════════════════════════════════════
-    -- 2) LOGIC_SOCIAL_LOBBY_EDIT_MGR — allow edits (client-side)
-    -- ═══════════════════════════════════════════════════════════════
-    pcall(function()
-        local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyEditMgrModule")
-        if type(M) ~= "table" then return end
-        local i = M.__inner_impl
-        if type(i) ~= "table" then return end
-
-        -- Init missing fields
-        if i._bIsEditing == nil then i._bIsEditing = false end
-        if i._bSaveFailAfterTriggeredReq == nil then i._bSaveFailAfterTriggeredReq = false end
-        if i._bAchievementSlotDataIsLatest == nil then i._bAchievementSlotDataIsLatest = true end
-        if i._bBgWallPicIsLatest == nil then i._bBgWallPicIsLatest = true end
-        if i._bCollectionHallSlotIsLatest == nil then i._bCollectionHallSlotIsLatest = true end
-
-        -- Save — no server, fake response
-        wrapFn(i, "SaveEditedData", function(orig)
-            return function(self, ...)
-                if type(i.on_edit_all_collect_hall_rsp) == "function" then
-                    pcall(i.on_edit_all_collect_hall_rsp, self, 0)
-                end
-                return true
-            end
-        end)
-
-        wrapFn(i, "SaveEditData", function() return function() return true end end)
-        wrapFn(i, "CheckBGWallSlotIfCanEquipItemId", function() return function() return true end end)
-        wrapFn(i, "GetWhetherNeedToSave", function() return function() return false end end)
-        wrapFn(i, "GetSaveFailAfterTriggeredReq", function() return function() return false end end)
-        wrapFn(i, "CheckIsShowUnlockPopup", function() return function() return false end end)
-        wrapFn(i, "ShowExistEditPopup", function() return function() end end)
-        wrapFn(i, "ShowUnlockSlotPopup", function() return function() end end)
-
-        print("[PSLOTV2] EditMgr fixed")
-    end)
-
-    -- ═══════════════════════════════════════════════════════════════
-    -- 3) THEME VEHICLE MANAGER — spawn car in lobby
-    -- ═══════════════════════════════════════════════════════════════
-    pcall(function()
-        local M = require("client.logic.lobby.ThemeVehicleManager")
-        if type(M) ~= "table" then return end
-        local i = M.__inner_impl
-        if type(i) ~= "table" then return end
-
-        -- GetSelfVehicleIDs — inject our list
-        wrapFn(i, "GetSelfVehicleIDs", function(orig)
-            return function(self, ...)
+                log("CALL " .. name .. "(" .. table.concat(args, ",") .. ")")
                 local ok, r = pcall(orig, self, ...)
-                if ok and type(r) == "table" then
-                    local n = 0; for _ in pairs(r) do n = n + 1 end
-                    if n > 0 then return r end
+                if not ok then
+                    log("  ERR " .. name .. " → " .. tostring(r))
+                    return nil
                 end
-                -- Return our list
-                return { 903, 904, 905, 906, 907 }  -- real vehicle types
+                if r ~= nil then
+                    if type(r) == "table" then
+                        local n = 0; for _ in pairs(r) do n = n + 1 end
+                        log("  RET " .. name .. " → tbl(" .. n .. ")")
+                    else
+                        log("  RET " .. name .. " → " .. tostring(r))
+                    end
+                else
+                    log("  RET " .. name .. " → nil")
+                end
+                return r
             end
-        end)
-
-        -- CheckVehicleTypeHasUnlock — always true
-        wrapFn(i, "CheckVehicleTypeHasUnlock", function()
-            return function() return true end
-        end)
-
-        -- HasEnoughVehicleShowSpecial — true
-        wrapFn(i, "HaveEnoughVehicleShowSpecial", function()
-            return function() return true end
-        end)
-
-        -- NeedShowSpecialThemeEffect — true
-        wrapFn(i, "NeedShowSpecialThemeEffect", function()
-            return function() return true end
-        end)
-
-        print("[PSLOTV2] ThemeVehicleManager fixed")
-    end)
-
-    -- ═══════════════════════════════════════════════════════════════
-    -- 4) VEHICLE COLLECT SYSTEM — guard nil CollectCarInfo
-    -- ═══════════════════════════════════════════════════════════════
-    pcall(function()
-        local M = require("client.logic.vehicle.VehicleCollectSystem")
-        if type(M) ~= "table" then return end
-        local i = M.__inner_impl
-        if type(i) ~= "table" then return end
-
-        -- Init missing
-        if i.CollectCarInfo == nil then i.CollectCarInfo = {} end
-        if i.EffectVehicleList == nil then i.EffectVehicleList = {} end
-        if i.inherit_car_collection == nil then i.inherit_car_collection = {} end
-        if i.car_collection == nil then i.car_collection = {} end
-
-        wrapFn(i, "GetDefaultShowVehicle", function(orig)
-            return function(self, ...)
-                local ok, r = pcall(orig, self, ...)
-                if ok and r then return r end
-                return 903  -- Dacia default
-            end
-        end)
-
-        print("[PSLOTV2] VehicleCollectSystem fixed")
-    end)
-
-    -- ═══════════════════════════════════════════════════════════════
-    -- 5) DIRECT CAR SPAWN — call ShowThemeVehicle with proper vehicle
-    -- ═══════════════════════════════════════════════════════════════
-    _G.SpawnLegendaryCarInLobby = function(vehicleID)
-        vehicleID = vehicleID or 903  -- default Dacia
-        local spawned = false
-        pcall(function()
-            local M = require("client.logic.lobby.ThemeVehicleManager")
-            if type(M) ~= "table" then return end
-            local i = M.__inner_impl
-            if type(i) ~= "table" then return end
-
-            -- Try ShowThemeVehicle
-            if type(i.ShowThemeVehicle) == "function" then
-                local ok, err = pcall(i.ShowThemeVehicle, i, vehicleID)
-                if ok then spawned = true end
-                print("[SPAWN] ShowThemeVehicle(" .. tostring(vehicleID) .. ") = " .. tostring(ok))
-            end
-        end)
-        return spawned
+        end
     end
 
-    -- ═══════════════════════════════════════════════════════════════
-    -- 6) RESEED — call to reshuffle
-    -- ═══════════════════════════════════════════════════════════════
-    _G.ReseedSlots = function()
-        _G.DX_Settings.ProfileSlotSeed = os.time() + math.random(1000, 99999)
-        print("[PSLOTV2] Reseeded, seed=" .. tostring(_G.DX_Settings.ProfileSlotSeed))
-    end
+    log("=== ALL HOOKED. Open profile now. ===")
+    print("[TRACE] Hooked. Open profile/social lobby now, then call DumpTrace()")
+end
 
-    print("[PSLOTV2] Install complete. MyUID=" .. tostring(MyUID))
-    return true
+_G.DumpTrace = function()
+    if not _G._SlotTraceLog then print("[TRACE] No trace data") return end
+    _G._SlotTraceLog[#_G._SlotTraceLog+1] = "=== TRACE ENDED ==="
+    local txt = table.concat(_G._SlotTraceLog, "\n")
+    writeDump("slot_trace.txt", txt)
+    print("[TRACE] Wrote " .. #_G._SlotTraceLog .. " lines")
+    return txt
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- AUTO-BOOT
+-- STEP 3: FORCE INJECT (multi-structure)
+-- ═══════════════════════════════════════════════════════════════════
+_G.ForceInjectSlots = function()
+    local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
+    if type(M) ~= "table" then print("[FORCE] Module not loaded") return end
+    local i = M.__inner_impl
+    if type(i) ~= "table" then print("[FORCE] Inner not loaded") return end
+
+    local uid = "0"
+    pcall(function()
+        if _G.DataMgr and _G.DataMgr.roleData then
+            uid = tostring(_G.DataMgr.roleData.uid or "0")
+        end
+    end)
+
+    -- Init all missing tables
+    local initTables = {
+        "_tOthersSocialDataMap", "_tSocialDataGetTime", "_tSlotTypeMaxCountMap",
+        "_tUCUnlockSlotMaxCount", "_tWeaponSlotIndex",
+    }
+    for _, tn in ipairs(initTables) do
+        if i[tn] == nil then
+            i[tn] = {}
+            print("[FORCE] Init " .. tn .. " = {}")
+        end
+    end
+    if i._tWeaponSlotIndex and not i._tWeaponSlotIndex[1] then
+        i._tWeaponSlotIndex = { [1] = {}, [2] = {} }
+    end
+
+    -- Real item IDs
+    local SLOT_TYPES = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }
+    local ITEMS = {
+        [1] = { 101001, 101002, 101003, 101004, 101005, 101006 },
+        [2] = { 903, 904, 905, 906, 907, 908 },
+        [3] = { 50008, 50009, 50010, 50017, 50018, 50033 },
+        [4] = { 10008, 10010, 10011, 20010, 20011, 20012 },
+        [5] = { 10008, 10010, 10011, 20010, 20011, 20012 },
+        [6] = { 10008, 10010, 10011, 20010, 20011, 20012 },
+        [7] = { 10008, 10010, 10011, 20010, 20011, 20012 },
+        [8] = { 10008, 10010, 10011, 20010, 20011, 20012 },
+        [9] = { 10008, 10010, 10011, 20010, 20011, 20012 },
+        [10] = { 10008, 10010, 10011, 20010, 20011, 20012 },
+    }
+
+    local function makeSlot(st, idx, itemID)
+        return {
+            slotType = st, SlotType = st, slotTypeID = st, type = st,
+            index = idx, slotIndex = idx, Index = idx, SlotIndex = idx,
+            itemID = itemID, itemId = itemID, ItemID = itemID,
+            resID = itemID, resId = itemID, ResID = itemID,
+            skinID = itemID, skinId = itemID, SkinID = itemID,
+            skin_res_id = itemID, res_id = itemID, resid = itemID,
+            isLock = false, isUnlock = true, isLocked = false, isOwned = true,
+            expire_ts = 0, expire_time = 0, expireTime = 0, isPermanent = true,
+            bIsLock = false, bLock = false, bIsUnlock = true,
+        }
+    end
+
+    -- Build nested structure (by slotType → index)
+    local byType = {}
+    for _, st in ipairs(SLOT_TYPES) do
+        byType[st] = {}
+        local pool = ITEMS[st] or ITEMS[1]
+        for idx = 1, 6 do
+            byType[st][idx] = makeSlot(st, idx, pool[((idx-1) % #pool) + 1])
+        end
+    end
+
+    -- Build flat structure (by index)
+    local flat = {}
+    for idx = 1, 20 do
+        local st = SLOT_TYPES[((idx-1) % #SLOT_TYPES) + 1]
+        local pool = ITEMS[st] or ITEMS[1]
+        flat[idx] = makeSlot(st, idx, pool[((idx-1) % #pool) + 1])
+    end
+
+    -- Build a huge social data object with ALL possible key names
+    local socialData = {
+        uid = uid, UID = uid, playerUID = uid, PlayerUID = uid,
+        slotData = byType, SlotData = byType, slotMap = byType, SlotMap = byType,
+        slots = flat, Slots = flat, slotList = flat, SlotList = flat,
+        allSlotData = flat, AllSlotData = flat,
+        data = byType, Data = byType,
+    }
+
+    -- Inject into every possible location
+    local keys = { uid, tostring(uid), "self", "me", "current", "_self", "SELF", 0, 1, "" }
+    for _, k in ipairs(keys) do
+        i._tOthersSocialDataMap[k] = socialData
+    end
+
+    -- Set max counts
+    for _, st in ipairs(SLOT_TYPES) do
+        i._tSlotTypeMaxCountMap[st] = 6
+        i._tUCUnlockSlotMaxCount[st] = 0
+    end
+
+    -- Set UID
+    pcall(function()
+        if type(i.SetCurUId) == "function" then
+            i.SetCurUId(i, uid)
+        end
+    end)
+
+    -- Fire refresh
+    pcall(function()
+        if type(i.on_get_collect_hall_data_rsp) == "function" then
+            i.on_get_collect_hall_data_rsp(i, socialData)
+        end
+    end)
+
+    local n = 0; for _ in pairs(i._tOthersSocialDataMap) do n = n + 1 end
+    print("[FORCE] Injected. _tOthersSocialDataMap now has " .. n .. " keys")
+    print("[FORCE] MyUID = " .. uid)
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 4: CAR SPAWN — all methods tried
+-- ═══════════════════════════════════════════════════════════════════
+_G.ForceCarSpawn = function(vehicleID)
+    vehicleID = vehicleID or 903
+    local M = require("client.logic.lobby.ThemeVehicleManager")
+    if type(M) ~= "table" then print("[CAR] Module not loaded") return end
+    local i = M.__inner_impl
+    if type(i) ~= "table" then print("[CAR] Inner not loaded") return end
+
+    if i.Vehicles == nil then i.Vehicles = {} end
+
+    print("[CAR] Attempting spawn vehicleID=" .. tostring(vehicleID))
+
+    local methods = {
+        { "ShowThemeVehicle", vehicleID },
+        { "ShowThemeVehicle", vehicleID, 1 },
+        { "_ShowSelfVehicle", vehicleID },
+        { "_CreateVehicleModel", vehicleID },
+        { "_TryCreateVehicleModel", vehicleID },
+        { "PreviewGarageVehicle", vehicleID },
+        { "OnVehicleChange", vehicleID, 1 },
+        { "OnGarageVehicleChange", vehicleID },
+        { "SetVehicleTick", true },
+    }
+
+    for _, m in ipairs(methods) {
+        local fnName = m[1]
+        local args = { m[2], m[3] }
+        if type(i[fnName]) == "function" then
+            local ok, err = pcall(i[fnName], i, args[1], args[2])
+            print("[CAR] " .. fnName .. " → " .. (ok and "OK" or ("ERR: " .. tostring(err))))
+        else
+            print("[CAR] " .. fnName .. " → NOT A FUNCTION")
+        end
+    end
+
+    -- Also try passing table format
+    pcall(function()
+        if type(i.ShowThemeVehicle) == "function" then
+            i.ShowThemeVehicle(i, { vehicleID = vehicleID, ID = vehicleID })
+        end
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- AUTO-RUN
 -- ═══════════════════════════════════════════════════════════════════
 pcall(function()
     local ticker = require("common.time_ticker")
     if ticker and ticker.AddTimerOnce then
-        for _, d in ipairs({ 2, 5, 10, 20, 40, 60 }) do
-            ticker.AddTimerOnce(d, function()
-                pcall(_G.PSlotFixV2_Install)
-            end)
-        end
+        ticker.AddTimerOnce(5.0, function()
+            pcall(_G.SlotSourceRead)
+        end)
     end
 end)
+
+print("[PATH-FIX v3.1] Loaded. Dumps go to: " .. DUMP_DIR)
 
 return true
