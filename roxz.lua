@@ -1,8 +1,14 @@
 -- ═══════════════════════════════════════════════════════════════════
--- INSTANCE HUNTER v7 — Find instance anywhere in game memory
+-- FIX v8 — MULTI-PATH WRITE + VERIFIED
+-- Har file 4 jagah likhi jaayegi. Ek toh kaam karega.
 -- ═══════════════════════════════════════════════════════════════════
 
-local DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
+local PATHS = {
+    "/storage/emulated/0/Android/data/com.pubg.imobile/files/",
+    "/storage/emulated/0/Android/data/com.vng.pubgmobile/files/",
+    "/storage/emulated/0/Android/data/com.tencent.ig/files/",
+    "/sdcard/",
+}
 
 local function POPUP(t, m)
     pcall(function()
@@ -11,13 +17,41 @@ local function POPUP(t, m)
                 and require("client.slua.logic.common.logic_common_msg_box"))
         if M and M.Show then M.Show(1, tostring(t), tostring(m), function() end, function() end, "OK", "CLOSE") end
     end)
+    print("[POPUP] " .. tostring(t) .. " | " .. tostring(m))
 end
 
-local function W(name, content)
-    local f, err = io.open(DIR .. name, "w")
-    if not f then return false, err end
-    f:write(content or ""); f:close()
-    return true
+-- ═══ WRITE to ALL paths, verify each ═══════════════════════════════
+local function SAVE(name, content)
+    local saved = {}
+    local failed = {}
+    for _, dir in ipairs(PATHS) do
+        local full = dir .. name
+        local f = io.open(full, "w")
+        if f then
+            local ok = pcall(function() f:write(content or "") end)
+            f:close()
+            if ok then
+                -- Verify read back
+                local vf = io.open(full, "r")
+                if vf then
+                    local read = vf:read("*a") or ""
+                    vf:close()
+                    if #read > 0 then
+                        saved[#saved+1] = full .. " (" .. #read .. "b)"
+                    else
+                        failed[#failed+1] = full .. " (empty)"
+                    end
+                else
+                    failed[#failed+1] = full .. " (no read)"
+                end
+            else
+                failed[#failed+1] = full .. " (write err)"
+            end
+        else
+            failed[#failed+1] = full .. " (open fail)"
+        end
+    end
+    return saved, failed
 end
 
 local function V(v, d, m)
@@ -33,264 +67,243 @@ local function V(v, d, m)
         for _ in pairs(v) do n = n + 1 end
         for k, val in pairs(v) do
             i = i + 1
-            if i > 15 then p[#p+1] = "...(+" .. (n-15) .. ")"; break end
-            p[#p+1] = tostring(k) .. "=" .. V(val, d+1, m)
+            if i > 15 then p[#p+1] = "...(+"..(n-15)..")"; break end
+            p[#p+1] = tostring(k).."="..V(val,d+1,m)
         end
-        return "{" .. table.concat(p, ",") .. "}"
+        return "{"..table.concat(p,",").."}"
     end
-    return "<" .. t .. ">"
+    return "<"..t..">"
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- HUNTER: find every table that has SetCurUId / GetCurUId as functions
+-- FIND INSTANCE — 5 ways
 -- ═══════════════════════════════════════════════════════════════════
-_G.InstanceHunter = function()
-    local out = {}
-    local function w(s) out[#out+1] = tostring(s) end
-    w("═══ INSTANCE HUNTER v7 ═══")
-    w("Time: " .. os.date("%Y-%m-%d %H:%M:%S"))
-    w("")
+local function findInstance()
+    -- Way 1: cached
+    if _G._SocialInstance then return _G._SocialInstance, "cache" end
 
-    -- METHOD 1: ModuleManager.GetModule with various call styles
-    w("═══ METHOD 1: ModuleManager.GetModule ═══")
+    -- Way 2: ModuleManager
     local MM = _G.ModuleManager
-    if type(MM) == "table" then
-        w("ModuleManager type: table")
-        w("GetModule type: " .. type(MM.GetModule))
-        w("LobbyModuleConfig type: " .. type(MM.LobbyModuleConfig))
-        
-        if type(MM.LobbyModuleConfig) == "table" then
-            for key, cfg in pairs(MM.LobbyModuleConfig) do
-                if type(cfg) == "table" and type(cfg.ModuleName) == "string" 
-                   and cfg.ModuleName:find("SocialLobby") then
-                    w("  Found cfg: " .. tostring(key) .. " → " .. cfg.ModuleName)
-                    -- Try different call styles
-                    local tries = {
-                        { "MM:GetModule(cfg)", function() return MM:GetModule(cfg) end },
-                        { "MM.GetModule(MM, cfg)", function() return MM.GetModule(MM, cfg) end },
-                        { "MM.GetModule(cfg)", function() return MM.GetModule(cfg) end },
-                        { "MM:GetModule(cfg.KeyName)", function() return MM:GetModule(cfg.KeyName) end },
-                        { "MM:GetModule(cfg.ModuleName)", function() return MM:GetModule(cfg.ModuleName) end },
-                    }
-                    for _, t in ipairs(tries) do
-                        local ok, r = pcall(t[2])
-                        w("  " .. t[1] .. " → " .. (ok and type(r) or ("ERR:"..tostring(r):sub(1,80))))
-                        if ok and type(r) == "table" then
-                            local n = 0; for _ in pairs(r) do n = n + 1 end
-                            w("    KEYS: " .. n)
-                            -- Check for data field
-                            if r._tOthersSocialDataMap ~= nil then
-                                w("    ✓ HAS _tOthersSocialDataMap")
-                                w("    " .. V(r._tOthersSocialDataMap, 0, 2))
-                            end
-                        end
-                    end
+    if type(MM) == "table" and type(MM.GetModule) == "function" and type(MM.LobbyModuleConfig) == "table" then
+        for key, cfg in pairs(MM.LobbyModuleConfig) do
+            if type(cfg) == "table" and type(cfg.ModuleName) == "string" and cfg.ModuleName:find("SocialLobby") then
+                local ok, inst = pcall(MM.GetModule, MM, cfg)
+                if ok and type(inst) == "table" and (inst.SetCurUId or inst.GetSlotDataBySlotTypeAndIndex) then
+                    _G._SocialInstance = inst
+                    return inst, "GetModule"
                 end
             end
         end
-    else
-        w("ModuleManager NOT a table")
     end
 
-    -- METHOD 2: Scan package.loaded for module files
-    w("")
-    w("═══ METHOD 2: Scan package.loaded ═══")
-    for path, mod in pairs(package.loaded) do
-        if type(path) == "string" and path:find("SocialLobby") then
-            w("  " .. path .. " = " .. type(mod))
-            if type(mod) == "table" then
-                local n = 0; for _ in pairs(mod) do n = n + 1 end
-                w("    keys: " .. n)
+    -- Way 3: M.instance / M.__instance / M.obj
+    local M = package.loaded["client.slua.logic.lobby.Left.Logic_SocialLobbyModule"]
+    if type(M) == "table" then
+        for _, k in ipairs({ "instance", "_instance", "__instance", "obj", "_obj", "self" }) do
+            if type(M[k]) == "table" and (M[k].SetCurUId or M[k].GetSlotDataBySlotTypeAndIndex) then
+                _G._SocialInstance = M[k]
+                return M[k], "M."..k
             end
         end
-    end
-
-    -- METHOD 3: Deep scan _G for tables with SetCurUId function
-    w("")
-    w("═══ METHOD 3: Deep scan _G for instance-like tables ═══")
-    local candidates = {}
-    local function checkTable(t, name, depth)
-        if depth > 3 then return end
-        if type(t) ~= "table" then return end
-        if candidates[t] then return end
-        candidates[t] = name
-        -- Check signature
-        if type(t.SetCurUId) == "function" or type(t.GetCurUId) == "function"
-           or type(t.GetSlotDataBySlotTypeAndIndex) == "function" then
-            w("  ✓ CANDIDATE: " .. name)
-            w("    SetCurUId=" .. type(t.SetCurUId) .. 
-              " GetCurUId=" .. type(t.GetCurUId) ..
-              " GetSlotData=" .. type(t.GetSlotDataBySlotTypeAndIndex))
-            w("    _tOthersSocialDataMap=" .. type(t._tOthersSocialDataMap))
+        -- Way 3b: M itself has methods at top level?
+        if type(M.SetCurUId) == "function" and type(M.GetSlotDataBySlotTypeAndIndex) == "function" then
+            _G._SocialInstance = M
+            return M, "M-direct"
         end
     end
-    
+
+    -- Way 4: _G scan
     for k, v in pairs(_G) do
-        if type(k) == "string" then
-            checkTable(v, "_G." .. k, 1)
-        end
-    end
-
-    -- METHOD 4: scan known game-wide containers
-    w("")
-    w("═══ METHOD 4: Known containers ═══")
-    local containers = { "Game", "GameplayData", "UIManager", "UIManagerInstance",
-                          "slua_GameFrontendHUD", "GameFrontendHUD", "Client",
-                          "EventSystem", "PlayerController", "LocalPlayer" }
-    for _, cn in ipairs(containers) do
-        local c = _G[cn]
-        if c ~= nil then
-            w("  _G." .. cn .. " = " .. type(c))
-            if type(c) == "table" then
-                for k, v in pairs(c) do
-                    if type(k) == "string" and type(v) == "table" then
-                        if type(v.SetCurUId) == "function" or type(v.GetSlotDataBySlotTypeAndIndex) == "function" then
-                            w("    ✓ " .. cn .. "." .. k .. " has slot signature")
-                        end
-                    end
-                end
+        if type(v) == "table" and type(k) == "string" then
+            if type(v.SetCurUId) == "function" and type(v.GetSlotDataBySlotTypeAndIndex) == "function" then
+                _G._SocialInstance = v
+                return v, "_G."..k
             end
         end
     end
 
-    -- METHOD 5: Search through all LobbyModuleConfig-loaded modules
-    w("")
-    w("═══ METHOD 5: All LobbyModuleConfig instances ═══")
+    -- Way 5: hunt for __inner_impl instance — the one with data fields
+    -- Check all LobbyModuleConfig instances
     if MM and type(MM.LobbyModuleConfig) == "table" and type(MM.GetModule) == "function" then
-        local found = 0
         for key, cfg in pairs(MM.LobbyModuleConfig) do
             local ok, inst = pcall(MM.GetModule, MM, cfg)
             if ok and type(inst) == "table" then
-                if type(inst.SetCurUId) == "function" 
-                   or type(inst.GetSlotDataBySlotTypeAndIndex) == "function"
-                   or type(inst.SetSlotUnlocked) == "function" then
-                    w("  ✓ " .. tostring(key) .. " → instance has slot signature")
-                    w("    " .. V(inst, 0, 1))
-                    found = found + 1
+                -- Look for the module that has _tOthersSocialDataMap OR SetSlotUnlocked
+                if inst._tOthersSocialDataMap ~= nil or type(inst.SetSlotUnlocked) == "function" then
+                    _G._SocialInstance = inst
+                    return inst, "LobbyCfg["..tostring(key).."]"
                 end
             end
         end
-        w("  Found: " .. found .. " instances")
     end
 
-    -- METHOD 6: Hook metamethods / __index to catch instance creation
-    w("")
-    w("═══ METHOD 6: Module class analysis ═══")
-    local M = package.loaded["client.slua.logic.lobby.Left.Logic_SocialLobbyModule"]
-    if type(M) == "table" then
-        w("M type: table")
-        w("M.__class: " .. type(M.__class))
-        w("M.__instance: " .. type(M.__instance))
-        w("M.instance: " .. type(M.instance))
-        
-        -- Check metatable
-        local mt = getmetatable(M)
-        if mt then
-            w("M metatable: " .. V(mt, 0, 2))
-            if mt.__call then w("  mt.__call = " .. tostring(mt.__call)) end
-            if mt.__index then w("  mt.__index = " .. type(mt.__index)) end
-        end
-        
-        -- Check __class
-        if type(M.__class) == "table" then
-            w("M.__class keys:")
-            local i = 0
-            for k, v in pairs(M.__class) do
-                i = i + 1
-                if i > 20 then break end
-                w("  " .. tostring(k) .. " = " .. type(v))
-            end
-            -- Is there a constructor?
-            if type(M.__class.ctor) == "function" then
-                w("  ✓ M.__class.ctor exists")
-            end
-            if type(M.__class.new) == "function" then
-                w("  ✓ M.__class.new exists")
-            end
-        end
-    end
-
-    local txt = table.concat(out, "\n")
-    W("instance_hunter.txt", txt)
-    print(txt)
-    return txt
+    return nil, "not found"
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- MEMORY HOOK — catch instance when it's created
--- ═══════════════════════════════════════════════════════════════════
-_G.HookInstanceCreation = function()
-    local M = package.loaded["client.slua.logic.lobby.Left.Logic_SocialLobbyModule"]
-    if type(M) ~= "table" then print("[HOOK] M not loaded") return end
-
-    -- Hook __class metatable
-    if type(M.__class) == "table" then
-        local cls = M.__class
-        local mt = getmetatable(cls)
-        if mt and type(mt.__call) == "function" then
-            local origCall = mt.__call
-            mt.__call = function(...)
-                local inst = origCall(...)
-                if type(inst) == "table" then
-                    _G._SocialLobbyInstance = inst
-                    print("[HOOK] Instance created! _G._SocialLobbyInstance set")
-                    POPUP("INSTANCE CAUGHT", "Instance created!\nNow use InstInjectSlots()")
-                end
-                return inst
-            end
-            print("[HOOK] Hooked __call")
-        end
-    end
-
-    -- Also hook the module M itself
-    local mtM = getmetatable(M)
-    if mtM and type(mtM.__call) == "function" then
-        local origM = mtM.__call
-        mtM.__call = function(...)
-            local r = origM(...)
-            if type(r) == "table" and (r.SetCurUId or r.GetSlotDataBySlotTypeAndIndex) then
-                _G._SocialLobbyInstance = r
-                print("[HOOK] Instance via M.__call! set _G._SocialLobbyInstance")
-            end
-            return r
-        end
-    end
-end
-
--- ═══════════════════════════════════════════════════════════════════
--- INSTANCE DUMP — once we have it
+-- INSTANCE DUMP
 -- ═══════════════════════════════════════════════════════════════════
 _G.InstDump = function()
-    local inst = _G._SocialLobbyInstance
+    local inst, how = findInstance()
     if not inst then
-        POPUP("NO INSTANCE", "Hook it first, or check instance_hunter.txt")
+        POPUP("NO INSTANCE", "Run InstHook() then open profile")
         return
     end
     local out = {}
     local function w(s) out[#out+1] = tostring(s) end
-    w("═══ INSTANCE DUMP ═══")
+    w("═══ INSTANCE DUMP via " .. how .. " ═══")
     w("Time: " .. os.date("%Y-%m-%d %H:%M:%S"))
     w("")
     local keys = {}
     for k in pairs(inst) do keys[#keys+1] = k end
-    table.sort(keys, function(a,b) return tostring(a) < tostring(b) end)
+    table.sort(keys, function(a,b) return tostring(a)<tostring(b) end)
     for _, k in ipairs(keys) do
         w("── " .. tostring(k) .. " (" .. type(inst[k]) .. ") ──")
         w("  " .. V(inst[k], 0, 4))
         w("")
     end
     local txt = table.concat(out, "\n")
-    W("instance_full_dump.txt", txt)
-    POPUP("INSTANCE DUMPED", "instance_full_dump.txt")
+    local saved, failed = SAVE("inst_dump.txt", txt)
+    POPUP("INSTANCE DUMPED",
+        "FOUND via: " .. how .. "\n\n" ..
+        "SAVED TO:\n" .. table.concat(saved, "\n") .. "\n\n" ..
+        (#failed > 0 and ("FAILED:\n" .. table.concat(failed, "\n")) or "All paths OK"))
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- INJECT into _G._SocialLobbyInstance
+-- HUNT — quick check all 5 methods
 -- ═══════════════════════════════════════════════════════════════════
-_G.InstInjectSlots = function()
-    local inst = _G._SocialLobbyInstance
+_G.InstHunt = function()
+    local out = {}
+    local function w(s) out[#out+1] = tostring(s) end
+    w("═══ INSTANCE HUNT ═══")
+    w("Time: " .. os.date("%Y-%m-%d %H:%M:%S"))
+    w("")
+
+    -- Test all methods
+    local M = package.loaded["client.slua.logic.lobby.Left.Logic_SocialLobbyModule"]
+    w("M type: " .. type(M))
+    if type(M) == "table" then
+        w("M.SetCurUId: " .. type(M.SetCurUId))
+        w("M.GetSlotDataBySlotTypeAndIndex: " .. type(M.GetSlotDataBySlotTypeAndIndex))
+        w("M.instance: " .. type(M.instance))
+        w("M.__instance: " .. type(M.__instance))
+        w("M._config: " .. V(M._config, 0, 2))
+    end
+
+    w("")
+    local MM = _G.ModuleManager
+    w("ModuleManager: " .. type(MM))
+    if type(MM) == "table" then
+        w("GetModule: " .. type(MM.GetModule))
+        w("LobbyModuleConfig: " .. type(MM.LobbyModuleConfig))
+        if type(MM.LobbyModuleConfig) == "table" then
+            local found = 0
+            for k, cfg in pairs(MM.LobbyModuleConfig) do
+                if type(cfg) == "table" and tostring(cfg.ModuleName or ""):find("SocialLobby") then
+                    found = found + 1
+                    w("  SocialLobby cfg: " .. tostring(k) .. " → " .. tostring(cfg.ModuleName))
+                    -- Try resolve
+                    local ok, inst = pcall(MM.GetModule, MM, cfg)
+                    w("    GetModule → " .. (ok and type(inst) or "ERR:"..tostring(inst):sub(1,60)))
+                    if ok and type(inst) == "table" then
+                        local n = 0; for _ in pairs(inst) do n = n + 1 end
+                        w("    inst keys: " .. n)
+                        w("    SetCurUId: " .. type(inst.SetCurUId))
+                        w("    _tOthersSocialDataMap: " .. type(inst._tOthersSocialDataMap))
+                    end
+                end
+            end
+            w("  Total SocialLobby cfgs: " .. found)
+        end
+    end
+
+    w("")
+    w("── _G scan for slot-signature tables ──")
+    local hits = 0
+    for k, v in pairs(_G) do
+        if type(k) == "string" and type(v) == "table" 
+           and type(v.SetCurUId) == "function" 
+           and type(v.GetSlotDataBySlotTypeAndIndex) == "function" then
+            hits = hits + 1
+            w("  ✓ _G." .. k)
+        end
+    end
+    w("  Total: " .. hits)
+
+    w("")
+    w("── All LobbyModule instances with slot signature ──")
+    if MM and type(MM.LobbyModuleConfig) == "table" and type(MM.GetModule) == "function" then
+        local hits2 = 0
+        for k, cfg in pairs(MM.LobbyModuleConfig) do
+            local ok, inst = pcall(MM.GetModule, MM, cfg)
+            if ok and type(inst) == "table" 
+               and type(inst.SetCurUId) == "function" then
+                hits2 = hits2 + 1
+                w("  ✓ " .. tostring(k) .. " (" .. tostring(cfg.ModuleName) .. ")")
+            end
+        end
+        w("  Total: " .. hits2)
+    end
+
+    local txt = table.concat(out, "\n")
+    local saved, failed = SAVE("inst_hunt.txt", txt)
+    POPUP("HUNT DONE",
+        "SAVED TO:\n" .. table.concat(saved, "\n") .. "\n\n" ..
+        "Failed: " .. #failed .. " paths")
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- HOOK __call to catch instance
+-- ═══════════════════════════════════════════════════════════════════
+_G.InstHook = function()
+    local M = package.loaded["client.slua.logic.lobby.Left.Logic_SocialLobbyModule"]
+    if type(M) ~= "table" then print("[HOOK] M not loaded") return end
+
+    -- Hook M itself if callable
+    local mtM = getmetatable(M)
+    if mtM and type(mtM.__call) == "function" and not mtM.__hooked then
+        local orig = mtM.__call
+        mtM.__call = function(...)
+            local r = orig(...)
+            if type(r) == "table" and (r.SetCurUId or r.GetSlotDataBySlotTypeAndIndex) then
+                _G._SocialInstance = r
+                print("[HOOK] instance caught via M.__call")
+            end
+            return r
+        end
+        mtM.__hooked = true
+        print("[HOOK] M.__call hooked")
+    end
+
+    -- Hook __class if callable
+    if type(M.__class) == "table" then
+        local mtC = getmetatable(M.__class)
+        if mtC and type(mtC.__call) == "function" and not mtC.__hooked then
+            local orig = mtC.__call
+            mtC.__call = function(...)
+                local r = orig(...)
+                if type(r) == "table" and (r.SetCurUId or r.GetSlotDataBySlotTypeAndIndex) then
+                    _G._SocialInstance = r
+                    print("[HOOK] instance caught via __class.__call")
+                end
+                return r
+            end
+            mtC.__hooked = true
+            print("[HOOK] __class.__call hooked")
+        end
+    end
+
+    POPUP("HOOK ACTIVE", "Instance hook ready.\nOpen profile now.")
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- INJECT — put fake slots on instance
+-- ═══════════════════════════════════════════════════════════════════
+_G.InstInject = function()
+    local inst, how = findInstance()
     if not inst then
-        POPUP("NO INSTANCE", "Run InstanceHunter first, then navigate to profile")
+        POPUP("NO INSTANCE", "Run InstHook then open profile, then InstInject()")
         return
     end
 
@@ -301,6 +314,7 @@ _G.InstInjectSlots = function()
         end
     end)
 
+    -- Init data fields
     for _, tn in ipairs({ "_tOthersSocialDataMap", "_tSocialDataGetTime",
                           "_tSlotTypeMaxCountMap", "_tUCUnlockSlotMaxCount" }) do
         if inst[tn] == nil then inst[tn] = {} end
@@ -364,35 +378,66 @@ _G.InstInjectSlots = function()
         end
     end)
 
-    POPUP("INJECTED", "Instance patched!\nUID: " .. uid)
+    local n = 0
+    for _ in pairs(inst._tOthersSocialDataMap) do n = n + 1 end
+
+    POPUP("INJECTED", 
+        "Instance patched via " .. how .. "\n" ..
+        "UID: " .. uid .. "\n" ..
+        "Data keys: " .. n .. "\n\n" ..
+        "Reopen Profile to see")
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- AUTO-BOOT: run hunter + hook
+-- CAR SPAWN — force legendary car
+-- ═══════════════════════════════════════════════════════════════════
+_G.CarSpawn = function(vehicleID)
+    vehicleID = vehicleID or 903
+    local M = require("client.logic.lobby.ThemeVehicleManager")
+    if type(M) ~= "table" then POPUP("CAR", "Not loaded") return end
+    local i = M.__inner_impl
+    if type(i) ~= "table" then POPUP("CAR", "Inner not loaded") return end
+
+    -- Try multiple functions
+    local tried = {}
+    for _, fnName in ipairs({ "ShowThemeVehicle", "_ShowSelfVehicle", "_CreateVehicleModel",
+                              "_TryCreateVehicleModel", "PreviewGarageVehicle", "OnVehicleChange" }) do
+        if type(i[fnName]) == "function" then
+            local ok, err = pcall(i[fnName], i, vehicleID)
+            tried[#tried+1] = fnName .. "=" .. (ok and "OK" or tostring(err):sub(1,40))
+        end
+    end
+    -- Try with table
+    pcall(function()
+        if type(i.ShowThemeVehicle) == "function" then
+            i.ShowThemeVehicle(i, { vehicleID = vehicleID })
+        end
+    end)
+
+    POPUP("CAR SPAWN", "ID: " .. vehicleID .. "\n" .. table.concat(tried, "\n"))
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- BOOT — auto-run
 -- ═══════════════════════════════════════════════════════════════════
 pcall(function()
     local ticker = require("common.time_ticker")
     if ticker and ticker.AddTimerOnce then
-        ticker.AddTimerOnce(5.0, function()
-            pcall(_G.InstanceHunter)
-            pcall(_G.HookInstanceCreation)
-            pcall(function()
-                local t = require("common.time_ticker")
-                if t and t.AddTimerOnce then
-                    t.AddTimerOnce(2.0, function()
-                        POPUP("HUNTER DONE",
-                            "1. instance_hunter.txt saved\n" ..
-                            "2. Creation hook active\n\n" ..
-                            "NOW: Open Profile / Social Lobby\n" ..
-                            "Instance catch hoga automatically\n" ..
-                            "Then: InstInjectSlots()")
-                    end)
-                end
-            end)
+        ticker.AddTimerOnce(3.0, function()
+            pcall(_G.InstHunt)
+            pcall(_G.InstHook)
         end)
     end
 end)
 
-print("[v7] Hunter loaded. Instance hook will activate in 5s.")
+-- Immediate test — write a proof file RIGHT NOW
+pcall(function()
+    local saved, failed = SAVE("_proof.txt", "Loaded at " .. os.date() .. "\nMulti-path writer active.")
+    POPUP("✓ LOADED", 
+        "SAVED TO:\n" .. table.concat(saved, "\n") .. "\n\n" ..
+        "FAILED:\n" .. (table.concat(failed, "\n")))
+end)
+
+print("[v8] Loaded. Multi-path writer active. 4 files max.")
 
 return true
