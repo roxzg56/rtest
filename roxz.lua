@@ -1,16 +1,25 @@
 -- ═══════════════════════════════════════════════════════════════════
--- v16 — REAL CAPTURE + PERSIST
--- Captures actual item ID from AddEquipItemIdToTableBySlotType
--- Path: /storage/emulated/0/Android/data/com.pubg.imobile/files/
+-- v17 — CONFIG DRIVEN FORCE DISPLAY
+-- Tu IDs daalega config file mein, hum force display karenge
+-- Config: /storage/emulated/0/Android/data/com.pubg.imobile/files/pslot_config.txt
 -- ═══════════════════════════════════════════════════════════════════
 
 local DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
+local CONFIG_FILE = "pslot_config.txt"
+local EDITS_FILE  = "pslot_edits.txt"
 
 local function S(name, content)
     local f = io.open(DIR .. name, "w")
     if not f then return false end
     f:write(content or ""); f:close()
     return true
+end
+
+local function R(name)
+    local f = io.open(DIR .. name, "r")
+    if not f then return nil end
+    local c = f:read("*a"); f:close()
+    return c
 end
 
 local function P(t, m)
@@ -26,13 +35,90 @@ local function P(t, m)
     end)
 end
 
-S("v16_step0.txt", "v16 loaded at " .. os.date("%Y-%m-%d %H:%M:%S"))
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 1: WRITE DEFAULT CONFIG (if not exists)
+-- ═══════════════════════════════════════════════════════════════════
+local defaultConfig = [[
+-- PSLOT CONFIG v17
+-- EDIT THIS FILE to change what appears in your profile display slots
+-- Save and reload game for changes to apply
+--
+-- SLOT TYPES:
+--   weapon    = Weapon slots (AR, SR, etc)
+--   vehicle   = Vehicle showcase slots
+--   pet       = Pet display slots
+--   bgWall    = Background wall
+--   avatarShow = Avatar showcase
+--   achievement = Achievement badges
+--
+-- ITEM ID ranges (approximate, may need tuning):
+--   Weapons:  101001-101020 (AR), 102001-102010 (SR), etc
+--   Vehicles: 903=Dacia, 904=UAZ, 905=Buggy, 906=Mirado, 907=Coupe,
+--             908=Zima, 909=Scooter, 910=UAZ, 911=Mirado, 912=...
+--   Pets:     50008=Cat, 50009=Dog, 50017=Wolf, 50018=Panda
+
+return {
+    weapon = {
+        [1] = 101008,   -- AR slot 1
+        [2] = 101004,   -- AR slot 2
+        [3] = 102001,   -- SR slot 1
+        [4] = 102002,   -- SR slot 2
+        [5] = 101003,   -- AR slot 3
+        [6] = 101005,   -- AR slot 4
+    },
+    vehicle = {
+        [1] = 903,      -- Dacia
+        [2] = 904,      -- UAZ
+        [3] = 906,      -- Mirado
+        [4] = 907,      -- Coupe RB
+        [5] = 960,      -- 
+        [6] = 961,
+    },
+    pet = {
+        [1] = 50008,    -- Cat
+        [2] = 50009,    -- Dog
+        [3] = 50017,    -- Wolf
+        [4] = 50018,    -- Panda
+        [5] = 50033,    -- Lion
+        [6] = 50010,    -- Penguin
+    },
+    bgWall = {
+        [1] = 50008,
+    },
+    avatarShow = {
+        [1] = 20010,
+    },
+    achievement = {
+        [1] = 20011,
+    },
+}
+]]
+
+if not R(CONFIG_FILE) then
+    S(CONFIG_FILE, defaultConfig)
+    print("[V17] Created default config: " .. DIR .. CONFIG_FILE)
+end
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 1: NUCLEAR REVERT — saare prefix hataye
+-- STEP 2: LOAD CONFIG
+-- ═══════════════════════════════════════════════════════════════════
+local function loadConfig()
+    local content = R(CONFIG_FILE)
+    if not content then return nil end
+    local fn = load(content)
+    if not fn then return nil end
+    local ok, data = pcall(fn)
+    if ok and type(data) == "table" then return data end
+    return nil
+end
+
+local CFG = loadConfig() or {}
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 3: NUCLEAR REVERT
 -- ═══════════════════════════════════════════════════════════════════
 local PREFIXES = {
-    "__mini11_", "__v12_", "__v13_", "__v14_", "__v15_",
+    "__mini11_", "__v12_", "__v13_", "__v14_", "__v15_", "__v16_",
     "__slotv10_", "__pet11_", "__pslotv2_", "__pslot11_",
 }
 
@@ -65,89 +151,67 @@ for _, path in ipairs({
     "client.slua.logic.lobby.Left.Logic_SocialLobbyModule",
     "client.slua.logic.lobby.Left.Logic_SocialLobbyEditMgrModule",
     "client.logic.lobby.ThemeVehicleManager",
-    "client.logic.vehicle.VehicleCollectSystem",
-    "client.logic.vehicle.LogicVehicleExtendedFeature",
-    "client.logic.vehicle.LogicVehicleAccessory",
 }) do
     pcall(function()
         local M = require(path)
         if M and M.__inner_impl then reverted = reverted + revertModule(M.__inner_impl) end
-        if M and M ~= M.__inner_impl then reverted = reverted + revertModule(M) end
     end)
 end
 
-S("v16_step1.txt", "Reverted: " .. reverted)
-
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 2: LOCAL STORAGE
--- ═══════════════════════════════════════════════════════════════════
-_G._V16 = _G._V16 or {
-    weapon = {}, vehicle = {}, pet = {}, petClothe = {},
-    bgWall = {}, avatarShow = {}, achievement = {},
-    raw = {},  -- raw args log
-}
-
-local function saveToDisk()
-    pcall(function()
-        local lines = {"return {"}
-        for cat, items in pairs(_G._V16) do
-            if cat ~= "raw" and type(items) == "table" then
-                table.insert(lines, "  " .. cat .. " = {")
-                for idx, itemID in pairs(items) do
-                    table.insert(lines, string.format("    [%s] = %s,", tostring(idx), tostring(itemID)))
-                end
-                table.insert(lines, "  },")
-            end
-        end
-        table.insert(lines, "}")
-        S("v16_edits.txt", table.concat(lines, "\n"))
-    end)
-end
-
-local function loadFromDisk()
-    pcall(function()
-        local f = io.open(DIR .. "v16_edits.txt", "r")
-        if not f then return end
-        local content = f:read("*a")
-        f:close()
-        local fn = load(content)
-        if fn then
-            local data = fn()
-            if type(data) == "table" then
-                for cat, items in pairs(data) do
-                    if _G._V16[cat] and type(items) == "table" then
-                        for idx, itemID in pairs(items) do
-                            _G._V16[cat][idx] = itemID
-                        end
-                    end
-                end
-            end
-        end
-    end)
-end
-
-loadFromDisk()
-
--- ═══════════════════════════════════════════════════════════════════
--- SLOT TYPE → KEY MAP
+-- SLOT KEY MAPPING
 -- ═══════════════════════════════════════════════════════════════════
 local function slotTypeToKey(st)
+    if st == nil then return nil end
     local s = type(st) == "string" and st:lower() or ""
-    local n = tonumber(st) or 0
+    local n = tonumber(st)
     if s:find("weapon") or s:find("gun") or n == 1 then return "weapon" end
     if s:find("vehicle") or s:find("car") or n == 2 then return "vehicle" end
-    if s:find("petclothe") or s:find("cloth") then return "petClothe" end
+    if s:find("petclothe") then return "petClothe" end
     if s:find("pet") or n == 3 then return "pet" end
-    if s:find("bgwall") or s:find("bg_wall") or n == 4 then return "bgWall" end
-    if s:find("avatarshow") or s:find("avatar_show") or n == 5 then return "avatarShow" end
+    if s:find("bgwall") or n == 4 then return "bgWall" end
+    if s:find("avatarshow") or n == 5 then return "avatarShow" end
     if s:find("achievement") or n == 6 then return "achievement" end
     return nil
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- WRAP HELPER
+-- MAKE FAKE SLOT DATA
 -- ═══════════════════════════════════════════════════════════════════
-local PFX = "__v16_"
+local function makeSlotData(slotType, index, itemID)
+    return {
+        slotType = slotType, slotTypeID = slotType, type = slotType,
+        SlotType = slotType, SlotTypeID = slotType,
+        index = index, slotIndex = index, Index = index, SlotIndex = index,
+        itemID = itemID, itemId = itemID, ItemID = itemID,
+        resID = itemID, resId = itemID, ResID = itemID,
+        skinID = itemID, skinId = itemID, SkinID = itemID,
+        skin_res_id = itemID, res_id = itemID,
+        isLock = false, isUnlock = true, isLocked = false, isOwned = true,
+        bIsLock = false, bLock = false, bIsUnlock = true, bIsOwned = true,
+        expire_ts = 0, expireTime = 0, ExpireTS = 0, isPermanent = true,
+        _v17 = true,
+    }
+end
+
+-- Build full slot tree from config
+local function buildSlotData()
+    local out = {}
+    for key, items in pairs(CFG) do
+        if type(items) == "table" then
+            out[key] = {}
+            for idx, itemID in pairs(items) do
+                out[key][idx] = itemID
+            end
+        end
+    end
+    return out
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 4: WRAP HELPER
+-- ═══════════════════════════════════════════════════════════════════
+local PFX = "__v17_"
 local function wrap(mod, name, wrapper)
     if not mod or type(mod[name]) ~= "function" then return false end
     if not mod[PFX .. name] then mod[PFX .. name] = mod[name] end
@@ -156,7 +220,7 @@ local function wrap(mod, name, wrapper)
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 3: SLOT UNLOCK (re-apply, ye working hai)
+-- STEP 5: SLOT UNLOCK
 -- ═══════════════════════════════════════════════════════════════════
 local unlocked = 0
 pcall(function()
@@ -165,13 +229,13 @@ pcall(function()
     if not i then return end
 
     if wrap(i, "GetSlotIsUnlockedByCollectHallLevel", function(orig)
-        return function(self, st, idx, ...) return true end
+        return function(self, ...) return true end
     end) then unlocked = unlocked + 1 end
     if wrap(i, "GetSlotIsUnlockBySlotTypeAndIndex", function(orig)
-        return function(self, st, idx, ...) return true end
+        return function(self, ...) return true end
     end) then unlocked = unlocked + 1 end
     if wrap(i, "GetSlotUnlockCountByCollectHallLevel", function(orig)
-        return function(self, st, ...) return 6 end
+        return function(self, ...) return 6 end
     end) then unlocked = unlocked + 1 end
     if wrap(i, "GetUnlockSlotByCollectHallMinLevel", function(orig)
         return function(self, ...) return 1 end
@@ -179,234 +243,142 @@ pcall(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 4: ⭐ MAIN CAPTURE — AddEquipItemIdToTableBySlotType ⭐
--- Ye wahi function hai jo (slotType, index, itemID) receive karta hai
+-- STEP 6: FORCE GETTERS — return config data ALWAYS
 -- ═══════════════════════════════════════════════════════════════════
-local captured = 0
+local forced = 0
+
 pcall(function()
     local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
     local i = M and M.__inner_impl
     if not i then return end
 
-    if type(i.AddEquipItemIdToTableBySlotType) == "function" then
-        wrap(i, "AddEquipItemIdToTableBySlotType", function(orig)
-            return function(self, ...)
-                local n = select("#", ...)
-                local args = {...}
-                
-                -- RAW LOG (for debugging)
-                local logLine = "AddEquipItemIdToTableBySlotType:"
-                for k = 1, n do
-                    logLine = logLine .. " [" .. k .. "]=" .. tostring(args[k]) .. " (" .. type(args[k]) .. ")"
-                end
-                _G._V16.raw[#_G._V16.raw+1] = logLine
-                print("[V16] " .. logLine)
-                
-                -- TRY MULTIPLE ARG INTERPRETATIONS
-                local function tryCapture(st, idx, itemID)
-                    if type(itemID) ~= "number" then return end
-                    if itemID < 100 or itemID > 99999999 then return end
-                    local key = slotTypeToKey(st)
-                    if not key then return end
-                    _G._V16[key][idx or 1] = itemID
-                    captured = captured + 1
-                    saveToDisk()
-                    print("[V16] CAPTURED: " .. key .. "[" .. tostring(idx) .. "] = " .. tostring(itemID))
-                end
-                
-                -- Interpretation 1: (slotType, index, itemID)
-                if n >= 3 then
-                    tryCapture(args[1], args[2], args[3])
-                end
-                -- Interpretation 2: (slotType, itemID)
-                if n >= 2 then
-                    tryCapture(args[1], 1, args[2])
-                end
-                -- Interpretation 3: (itemID, slotType)
-                if n >= 2 then
-                    tryCapture(args[2], 1, args[1])
-                end
-                -- Interpretation 4: (uid, slotType, index, itemID)
-                if n >= 4 then
-                    tryCapture(args[2], args[3], args[4])
-                end
-                -- Interpretation 5: table arg
-                if type(args[1]) == "table" then
-                    local t = args[1]
-                    local st = t.slotType or t.SlotType or t.type
-                    local idx = t.index or t.slotIndex or t.Index
-                    local itemID = t.itemID or t.itemId or t.ItemID or t.resID
-                    tryCapture(st, idx, itemID)
-                end
-                
-                return orig(self, ...)
+    -- Main slot getter
+    if wrap(i, "GetSlotDataBySlotTypeAndIndex", function(orig)
+        return function(self, slotType, index, ...)
+            local key = slotTypeToKey(slotType)
+            if key and CFG[key] and CFG[key][index] then
+                return makeSlotData(slotType, index, CFG[key][index])
             end
-        end)
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════════════
--- STEP 5: BACKUP CAPTURE — SetSocialDataByKey + SetSlotUnlocked
--- ═══════════════════════════════════════════════════════════════════
-pcall(function()
-    local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
-    local i = M and M.__inner_impl
-    if not i then return end
-
-    if type(i.SetSocialDataByKey) == "function" then
-        wrap(i, "SetSocialDataByKey", function(orig)
-            return function(self, key, value, ...)
-                local logLine = "SetSocialDataByKey: key=" .. tostring(key) .. " value=" .. tostring(value)
-                _G._V16.raw[#_G._V16.raw+1] = logLine
-                print("[V16] " .. logLine)
-                return orig(self, key, value, ...)
-            end
-        end)
-    end
-
-    if type(i.SetSlotUnlocked) == "function" then
-        wrap(i, "SetSlotUnlocked", function(orig)
-            return function(self, st, idx, locked, ...)
-                print("[V16] SetSlotUnlocked: " .. tostring(st) .. " idx=" .. tostring(idx) .. " locked=" .. tostring(locked))
-                return orig(self, st, idx, locked, ...)
-            end
-        end)
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════════════
--- STEP 6: SLOT EQUIP — log UID+slotIndex args
--- ═══════════════════════════════════════════════════════════════════
-pcall(function()
-    local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
-    local i = M and M.__inner_impl
-    if not i then return end
-
-    local equipFns = {
-        "WeaponSlotEquipItemId", "VehicleSlotEquipItemId",
-        "PetSlotEquipItemId", "PetSlotEquipClotheItemId",
-        "BGWallSlotEquipItemId", "AvatarShowSlotEquipItemId",
-        "AchievementSlotEquipItemId",
-    }
-    for _, fnName in ipairs(equipFns) do
-        if type(i[fnName]) == "function" then
-            wrap(i, fnName, function(orig)
-                return function(self, ...)
-                    local args = {...}
-                    local n = select("#", ...)
-                    local logLine = fnName .. ":"
-                    for k = 1, n do
-                        logLine = logLine .. " [" .. k .. "]=" .. tostring(args[k])
-                    end
-                    _G._V16.raw[#_G._V16.raw+1] = logLine
-                    print("[V16] " .. logLine)
-                    return orig(self, ...)
-                end
-            end)
+            return orig(self, slotType, index, ...)
         end
-    end
+    end) then forced = forced + 1 end
+
+    -- All slots getter
+    if wrap(i, "GetSlotTypeAllSlotData", function(orig)
+        return function(self, slotType, ...)
+            local key = slotTypeToKey(slotType)
+            if key and CFG[key] then
+                local result = {}
+                for idx, itemID in pairs(CFG[key]) do
+                    result[idx] = makeSlotData(slotType, idx, itemID)
+                end
+                return result
+            end
+            return orig(self, slotType, ...)
+        end
+    end) then forced = forced + 1 end
+
+    -- All unlock data
+    if wrap(i, "GetSlotTypeAllUnlockData", function(orig)
+        return function(self, slotType, ...)
+            local key = slotTypeToKey(slotType)
+            if key and CFG[key] then
+                local result = {}
+                for idx, itemID in pairs(CFG[key]) do
+                    result[idx] = true
+                end
+                return result
+            end
+            return orig(self, slotType, ...)
+        end
+    end) then forced = forced + 1 end
+
+    -- Equipped count
+    if wrap(i, "GetSlotTypeEquippedSlotCount", function(orig)
+        return function(self, slotType, ...)
+            local key = slotTypeToKey(slotType)
+            if key and CFG[key] then
+                local n = 0
+                for _ in pairs(CFG[key]) do n = n + 1 end
+                return n
+            end
+            return orig(self, slotType, ...)
+        end
+    end) then forced = forced + 1 end
+
+    -- Have any
+    if wrap(i, "GetHaveAnySlotIsEquipped", function(orig)
+        return function(self, ...) return true end
+    end) then forced = forced + 1 end
+
+    -- Check is use
+    if wrap(i, "CheckSlotTypeIsUseItemId", function(orig)
+        return function(self, ...) return true end
+    end) then forced = forced + 1 end
 end)
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 7: GETTER OVERRIDE — return local edits always
--- ═══════════════════════════════════════════════════════════════════
-local getters = 0
-pcall(function()
-    local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
-    local i = M and M.__inner_impl
-    if not i then return end
-
-    -- Main getter
-    if type(i.GetSlotDataBySlotTypeAndIndex) == "function" then
-        wrap(i, "GetSlotDataBySlotTypeAndIndex", function(orig)
-            return function(self, slotType, index, ...)
-                local key = slotTypeToKey(slotType)
-                if key and _G._V16[key] and _G._V16[key][index] then
-                    local itemID = _G._V16[key][index]
-                    return {
-                        slotType = slotType, slotTypeID = slotType, type = slotType,
-                        index = index, slotIndex = index,
-                        itemID = itemID, itemId = itemID, ItemID = itemID,
-                        resID = itemID, resId = itemID,
-                        skinID = itemID, skinId = itemID,
-                        isLock = false, isUnlock = true, isOwned = true,
-                        expire_ts = 0, expireTime = 0, isPermanent = true,
-                        _v16 = true,
-                    }
-                end
-                return orig(self, slotType, index, ...)
-            end
-        end)
-        getters = getters + 1
-    end
-
-    -- All slot data getter
-    if type(i.GetSlotTypeAllSlotData) == "function" then
-        wrap(i, "GetSlotTypeAllSlotData", function(orig)
-            return function(self, slotType, ...)
-                local r = orig(self, slotType, ...)
-                local key = slotTypeToKey(slotType)
-                if key and _G._V16[key] then
-                    if type(r) ~= "table" then r = {} end
-                    for idx, itemID in pairs(_G._V16[key]) do
-                        r[idx] = {
-                            slotType = slotType, itemID = itemID, index = idx,
-                            isLock = false, isOwned = true, _v16 = true,
-                        }
-                    end
-                end
-                return r
-            end
-        end)
-        getters = getters + 1
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════════════
--- STEP 8: RSP INJECT — merge our edits into server data BEFORE processing
+-- STEP 7: FORCE RSP — inject config into server data
 -- ═══════════════════════════════════════════════════════════════════
 local injected = 0
+
 pcall(function()
     local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
     local i = M and M.__inner_impl
     if not i then return end
 
-    if type(i.on_get_collect_hall_data_rsp) == "function" then
-        wrap(i, "on_get_collect_hall_data_rsp", function(orig)
-            return function(self, data, ...)
-                -- Enrich server data with our edits
-                pcall(function()
-                    if type(data) ~= "table" then return end
-                    data.slotData = data.slotData or {}
-                    -- Inject per slotType
-                    local SLOT_KEYS = {
-                        weapon = 1, vehicle = 2, pet = 3,
-                        bgWall = 4, avatarShow = 5, achievement = 6,
-                    }
-                    for key, st in pairs(SLOT_KEYS) do
-                        if _G._V16[key] then
-                            data.slotData[st] = data.slotData[st] or {}
-                            for idx, itemID in pairs(_G._V16[key]) do
-                                data.slotData[st][idx] = {
-                                    slotType = st, slotTypeID = st, type = st,
-                                    index = idx, slotIndex = idx,
-                                    itemID = itemID, itemId = itemID, ItemID = itemID,
-                                    resID = itemID, resId = itemID,
-                                    skinID = itemID, skinId = itemID,
-                                    isLock = false, isUnlock = true, isOwned = true,
-                                    expire_ts = 0, isPermanent = true, _v16 = true,
-                                }
-                            end
-                        end
-                    end
-                end)
-                return orig(self, data, ...)
+    local function injectInto(data)
+        if type(data) ~= "table" then return end
+        -- Common structure fields
+        if not data.slotData then data.slotData = {} end
+        if not data.slots then data.slots = {} end
+        if not data.allSlotData then data.allSlotData = {} end
+        if not data.slotMap then data.slotMap = {} end
+
+        -- Slot type numeric map
+        local SLOT_NUMS = { weapon = 1, vehicle = 2, pet = 3, bgWall = 4, avatarShow = 5, achievement = 6 }
+
+        for key, items in pairs(CFG) do
+            local stNum = SLOT_NUMS[key]
+            if stNum and type(items) == "table" then
+                for idx, itemID in pairs(items) do
+                    local slotObj = makeSlotData(stNum, idx, itemID)
+                    data.slotData[stNum] = data.slotData[stNum] or {}
+                    data.slotData[stNum][idx] = slotObj
+                    data.allSlotData[stNum] = data.allSlotData[stNum] or {}
+                    data.allSlotData[stNum][idx] = slotObj
+                    data.slots[#data.slots+1] = slotObj
+                    data.slotMap[stNum] = data.slotMap[stNum] or {}
+                    data.slotMap[stNum][idx] = slotObj
+                end
             end
-        end)
-        injected = injected + 1
+        end
     end
 
-    -- Also: edit mgr RSP
+    -- Patch collect hall RSP
+    if wrap(i, "on_get_collect_hall_data_rsp", function(orig)
+        return function(self, data, ...)
+            injectInto(data)
+            return orig(self, data, ...)
+        end
+    end) then injected = injected + 1 end
+
+    -- Patch other mixed hall RSP
+    if wrap(i, "on_get_other_mixed_hall_data_rsp", function(orig)
+        return function(self, data, ...)
+            injectInto(data)
+            return orig(self, data, ...)
+        end
+    end) then injected = injected + 1 end
+
+    -- Patch unlock RSP
+    if wrap(i, "on_unlock_collect_hall_slot_rsp", function(orig)
+        return function(self, err, ...)
+            return orig(self, 0, ...)
+        end
+    end) then injected = injected + 1 end
+
+    -- Patch edit mgr RSP
     local E = require("client.slua.logic.lobby.Left.Logic_SocialLobbyEditMgrModule")
     local ei = E and E.__inner_impl
     if ei then
@@ -418,9 +390,7 @@ pcall(function()
             if type(ei[fn]) == "function" then
                 wrap(ei, fn, function(orig)
                     return function(self, err, ...)
-                        saveToDisk()
-                        pcall(orig, self, 0, ...)
-                        return true
+                        return orig(self, 0, ...)
                     end
                 end)
                 injected = injected + 1
@@ -430,39 +400,131 @@ pcall(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════════════
--- FINAL REPORT
+-- STEP 8: PERIODIC FORCE — every 1 second, re-inject into internal state
 -- ═══════════════════════════════════════════════════════════════════
-local editCount = 0
-for _, items in pairs(_G._V16) do
+pcall(function()
+    local ticker = require("common.time_ticker")
+    if ticker and ticker.AddTimerLoop then
+        ticker.AddTimerLoop(0, function()
+            pcall(function()
+                local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
+                local i = M and M.__inner_impl
+                if not i then return end
+
+                -- Force-fill _tOthersSocialDataMap with our data
+                local MyUID = "self"
+                pcall(function()
+                    if _G.DataMgr and _G.DataMgr.roleData then
+                        MyUID = tostring(_G.DataMgr.roleData.uid or "self")
+                    end
+                end)
+
+                -- Ensure map exists
+                if not i._tOthersSocialDataMap then
+                    i._tOthersSocialDataMap = {}
+                end
+
+                -- Build fake social data
+                local socialData = {
+                    uid = MyUID,
+                    slotData = {},
+                    slots = {},
+                    allSlotData = {},
+                    collectHallLevel = 999,
+                }
+
+                local SLOT_NUMS = { weapon = 1, vehicle = 2, pet = 3, bgWall = 4, avatarShow = 5, achievement = 6 }
+                for key, items in pairs(CFG) do
+                    local stNum = SLOT_NUMS[key]
+                    if stNum and type(items) == "table" then
+                        socialData.slotData[stNum] = {}
+                        for idx, itemID in pairs(items) do
+                            local slotObj = makeSlotData(stNum, idx, itemID)
+                            socialData.slotData[stNum][idx] = slotObj
+                            socialData.slots[#socialData.slots+1] = slotObj
+                            socialData.allSlotData[#socialData.allSlotData+1] = slotObj
+                        end
+                    end
+                end
+
+                -- Inject for all keys (self, uid, etc)
+                i._tOthersSocialDataMap[MyUID] = socialData
+                i._tOthersSocialDataMap["self"] = socialData
+                i._tOthersSocialDataMap["me"] = socialData
+                i._tOthersSocialDataMap[0] = socialData
+                i._tOthersSocialDataMap[1] = socialData
+            end)
+        end, -1, 1.0)
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 9: NEUTRALIZE SAVE (no-op, no server)
+-- ═══════════════════════════════════════════════════════════════════
+pcall(function()
+    local E = require("client.slua.logic.lobby.Left.Logic_SocialLobbyEditMgrModule")
+    local ei = E and E.__inner_impl
+    if not ei then return end
+
+    if wrap(ei, "SaveEditedData", function(orig)
+        return function(self, ...)
+            P("SAVE", "Saved (client-only)")
+            return true
+        end
+    end) then end
+
+    if wrap(ei, "SaveEditData", function(orig)
+        return function(self, ...) return true end
+    end) then end
+
+    if wrap(ei, "GetWhetherNeedToSave", function(orig)
+        return function(self, ...) return false end
+    end) then end
+
+    -- Blockers
+    for _, fn in ipairs({
+        "GetSaveFailAfterTriggeredReq", "ShowSaveFailedPopup",
+        "ShowUnlockFailedPopup", "ShowUnlockSlotPopup",
+        "CheckIsShowUnlockPopup",
+    }) do
+        if type(ei[fn]) == "function" then
+            wrap(ei, fn, function(orig)
+                return function(self, ...) 
+                    if fn == "GetSaveFailAfterTriggeredReq" then return false end
+                    return 
+                end
+            end)
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════
+-- FINAL REPORT + POPUP
+-- ═══════════════════════════════════════════════════════════════════
+local cfgCount = 0
+for _, items in pairs(CFG) do
     if type(items) == "table" then
-        for _ in pairs(items) do editCount = editCount + 1 end
+        for _ in pairs(items) do cfgCount = cfgCount + 1 end
     end
 end
 
-local report = "v16 REPORT\n"
-    .. "Time: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n"
-    .. "Reverted: " .. reverted .. "\n"
-    .. "Unlocked: " .. unlocked .. "\n"
-    .. "Captured items: " .. captured .. "\n"
-    .. "Getters wrapped: " .. getters .. "\n"
-    .. "RSP injected: " .. injected .. "\n"
-    .. "Total edits: " .. editCount .. "\n"
-
-S("v16_report.txt", report)
-
--- Also save raw log
-S("v16_raw_log.txt", table.concat(_G._V16.raw, "\n"))
-
-P("v16 LOADED",
+S("v17_report.txt",
+    "v17 REPORT\n" ..
+    "Time: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n" ..
     "Reverted: " .. reverted .. "\n" ..
     "Unlocked: " .. unlocked .. "\n" ..
-    "Getters: " .. getters .. "\n" ..
+    "Forced getters: " .. forced .. "\n" ..
+    "RSP injected: " .. injected .. "\n" ..
+    "Config items: " .. cfgCount .. "\n"
+)
+
+P("v17 LOADED",
+    "Config items: " .. cfgCount .. "\n" ..
+    "Forced: " .. forced .. "\n" ..
     "RSP: " .. injected .. "\n\n" ..
-    "Test:\n" ..
-    "1. Slot pe gun select karo\n" ..
-    "2. Save dabao\n" ..
-    "3. Cross dabao\n" ..
-    "4. Wapas kholo\n\n" ..
-    "Agar capture hua toh v16_raw_log.txt mein dikhega")
+    "Config file:\n" .. CONFIG_FILE .. "\n\n" ..
+    "Edit karo, reload karo,\n" ..
+    "IDs change karo,\n" ..
+    "display change hoga")
 
 return true
