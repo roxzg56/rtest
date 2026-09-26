@@ -1,561 +1,462 @@
--- ═══════════════════════════════════════════════════════════════════
--- profile_pet_dump v2 — CORRECTED
--- Scans LobbyModuleConfig registry directly to find real paths
--- Focus: pet_manager, profileframe, socialcardframe, custom_presentation,
---        collect_pet_module, all wardrobe cosmetics
--- ═══════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════════════
+-- PROFILE DISPLAY SLOTS FILLER + LOBBY LEGENDARY CAR v1
+-- Drop-in at END of any file. Auto-boots.
+-- Client-side only. Blocks server sync.
+-- ═══════════════════════════════════════════════════════════════════════════
 
-_G._PPDUMP2 = _G._PPDUMP2 or { phases = {}, last_state = nil, pc_attached = nil }
+_G.DX_Settings = _G.DX_Settings or {}
+if _G.DX_Settings.FillProfileSlots == nil then _G.DX_Settings.FillProfileSlots = true end
+if _G.DX_Settings.LobbyLegendaryCar == nil then _G.DX_Settings.LobbyLegendaryCar = true end
+if _G.DX_Settings.ProfileSlotSeed == nil then _G.DX_Settings.ProfileSlotSeed = os.time() end
 
-local DUMP_DIRS = {
-    "/storage/emulated/0/Android/data/com.pubg.imobile/files/",
-    "/storage/emulated/0/Android/data/com.vng.pubgmobile/files/",
-    "/storage/emulated/0/Android/data/com.tencent.ig/files/",
-    "/sdcard/",
+-- ─── ITEM POOLS ────────────────────────────────────────────────────
+local WEAPON_POOL = {
+    -- AR
+    101001, 101002, 101003, 101004, 101005, 101006, 101007, 101008, 101009, 101010, 101011, 101012,
+    -- SR
+    102001, 102002, 102003, 102004, 102005,
+    -- DMR
+    103001, 103002, 103003, 103004, 103005, 103006, 103007, 103008,
+    -- LMG
+    104001, 104002, 104003, 104004,
+    -- SMG
+    105001, 105002, 105003, 105004, 105005, 105006, 105007,
+    -- Shotgun
+    106001, 106002, 106003, 106004, 106005, 106006,
+    -- Pistol
+    107001, 107002, 107003, 107004, 107005, 107006, 107007, 107008,
 }
 
-local function _writeFile(name, content)
-    for _, dir in ipairs(DUMP_DIRS) do
-        local ok = false
-        pcall(function()
-            local f = io.open(dir .. name, "w")
-            if f then f:write(content); f:close(); ok = true; print("[PPDUMP2] wrote " .. dir .. name) end
-        end)
-        if ok then return true end
-    end
-    return false
+local VEHICLE_POOL = {
+    903, 904, 905, 906, 907, 908, 909, 910, 911, 912, 913, 914, 915, 916, 917, 918, 919, 920,
+    930, 953, 960, 961, 963, 966, 967,
+    -- Legendary / special
+    1901001, 1902001, 1903001, 1904001, 1911001, 1913001, 1917001, 1961001, 1966001,
+}
+
+local PET_POOL = {
+    50000, 50003, 50004, 50005, 50006, 50007, 50008, 50009, 50010, 50011, 50012, 50013, 50014,
+    50015, 50016, 50017, 50018, 50019, 50020, 50021, 50022, 50023, 50024, 50025, 50026, 50027,
+    50028, 50029, 50030, 50031, 50032, 50033, 50034, 50035, 50036, 50037, 50038, 50039, 50040,
+    50041, 50042, 50043, 50044, 50045, 50046, 50047, 50048,
+}
+
+local AVATAR_POOL = {
+    10008, 10010, 10011, 20010, 20011, 20012, 20013, 20014, 20015, 20016, 20017, 50002,
+    401985, 40601002,
+}
+
+-- Legendary car IDs — high-tier vehicles only
+local LEGENDARY_CARS = {
+    1901001, 1902001, 1903001, 1911001, 1913001, 1917001, 1961001, 1966001,
+    1953001, 1961068, 1908119, 19116004,
+}
+
+-- ─── SEEDED RANDOM (deterministic per seed) ───────────────────────
+local _slotCache = {}
+local function pickRandom(pool, slotKey)
+    if not pool or #pool == 0 then return nil end
+    local cache = _slotCache[slotKey]
+    if cache then return cache end
+    local idx = ((_G.DX_Settings.ProfileSlotSeed + #slotKey) % #pool) + 1
+    _slotCache[slotKey] = pool[idx]
+    return pool[idx]
 end
 
-local function detectPhase()
-    local phase
-    pcall(function()
-        if GameStatus and GameStatus.IsInLobbyOrMainCity and GameStatus.IsInLobbyOrMainCity() then
-            phase = "lobby"
-        elseif GameStatus and GameStatus.IsInFightingStatus and GameStatus.IsInFightingStatus() then
-            phase = "match"
-        end
-    end)
-    return phase
-end
-
--- Deep value formatter (same as v1)
-local function _dv(v, depth, maxDepth)
-    depth, maxDepth = depth or 0, maxDepth or 3
-    local t = type(v)
-    if t == "nil"     then return "nil" end
-    if t == "boolean" then return tostring(v) end
-    if t == "number"  then return tostring(v) end
-    if t == "string"  then
-        if #v > 160 then return string.format("%q", v:sub(1, 157) .. "...") end
-        return string.format("%q", v)
-    end
-    if t == "function" then return "<fn>" end
-    if t == "userdata" then
-        local name = "<ud>"
-        pcall(function() if v.GetName then name = "<ud:" .. tostring(v:GetName()) .. ">" end end)
-        return name
-    end
-    if t == "thread"   then return "<thread>" end
-    if t == "table" then
-        if depth >= maxDepth then
-            local n = 0; for _ in pairs(v) do n = n + 1 end
-            return "<tbl:" .. n .. ">"
-        end
-        local parts, i, n = {}, 0, 0
-        for _ in pairs(v) do n = n + 1 end
-        for k, val in pairs(v) do
-            i = i + 1
-            if i > 40 then parts[#parts + 1] = "...(+" .. (n - 40) .. ")"; break end
-            parts[#parts + 1] = tostring(k) .. "=" .. _dv(val, depth + 1, maxDepth)
-        end
-        return "{" .. table.concat(parts, ",") .. "}"
-    end
-    return "<" .. t .. ">"
-end
-
--- Dump a single module
-local function dumpModule(buf, modPath, mod, deepInner)
-    buf[#buf + 1] = ""
-    buf[#buf + 1] = string.rep("─", 68)
-    buf[#buf + 1] = "MODULE: " .. modPath
-    buf[#buf + 1] = string.rep("─", 68)
-
-    if not mod then
-        buf[#buf + 1] = "  STATUS: NOT LOADED (nil)"
-        return
-    end
-    if type(mod) ~= "table" then
-        buf[#buf + 1] = "  STATUS: loaded, type = " .. type(mod)
-        return
-    end
-
-    buf[#buf + 1] = "  STATUS: loaded (table)"
-    local keys = {}
-    for k in pairs(mod) do keys[#keys + 1] = k end
-    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-    buf[#buf + 1] = "  KEY COUNT: " .. #keys
-
-    local fns, tbls, scalars, uds = {}, {}, {}, {}
-    for _, k in ipairs(keys) do
-        local v = mod[k]
-        local vt = type(v)
-        if vt == "function" then fns[#fns + 1] = k
-        elseif vt == "table" then tbls[#tbls + 1] = k
-        elseif vt == "userdata" then uds[#uds + 1] = k
-        else scalars[#scalars + 1] = k end
-    end
-
-    if #fns > 0 then
-        buf[#buf + 1] = ""
-        buf[#buf + 1] = "  FUNCTIONS (" .. #fns .. "):"
-        for _, k in ipairs(fns) do
-            local info = ""
-            pcall(function()
-                local dbg = debug and debug.getinfo and debug.getinfo(mod[k], "S")
-                if dbg then
-                    if dbg.what == "C" then info = " [C]"
-                    elseif dbg.source then
-                        local src = dbg.source:gsub("^@", "")
-                        if #src > 70 then src = "..." .. src:sub(-67) end
-                        info = " [" .. src .. ":" .. tostring(dbg.linedefined or 0) .. "]"
-                    end
-                end
-            end)
-            buf[#buf + 1] = "    fn " .. tostring(k) .. info
-        end
-    end
-
-    if #tbls > 0 then
-        buf[#buf + 1] = ""
-        buf[#buf + 1] = "  TABLES (" .. #tbls .. "):"
-        for _, k in ipairs(tbls) do
-            local v = mod[k]
-            local n = 0; for _ in pairs(v) do n = n + 1 end
-            buf[#buf + 1] = "    tbl " .. tostring(k) .. " (" .. n .. " keys)"
-            buf[#buf + 1] = "      " .. _dv(v, 0, 4)
-        end
-    end
-
-    if #uds > 0 then
-        buf[#buf + 1] = ""
-        buf[#buf + 1] = "  USERDATA (" .. #uds .. "):"
-        for _, k in ipairs(uds) do
-            buf[#buf + 1] = "    ud " .. tostring(k) .. " = " .. _dv(mod[k], 0, 1)
-        end
-    end
-
-    if #scalars > 0 then
-        buf[#buf + 1] = ""
-        buf[#buf + 1] = "  SCALARS (" .. #scalars .. "):"
-        for _, k in ipairs(scalars) do
-            buf[#buf + 1] = "    " .. tostring(k) .. " = " .. _dv(mod[k], 0, 2)
-        end
-    end
-
-    -- __inner_impl deep
-    if type(mod.__inner_impl) == "table" then
-        buf[#buf + 1] = ""
-        buf[#buf + 1] = "  ▶ __inner_impl (deep):"
-        local iimpl = mod.__inner_impl
-        local ikeys = {}
-        for k in pairs(iimpl) do ikeys[#ikeys + 1] = k end
-        table.sort(ikeys, function(a, b) return tostring(a) < tostring(b) end)
-        for _, ik in ipairs(ikeys) do
-            local iv = iimpl[ik]
-            if type(iv) == "function" then
-                local info = ""
-                pcall(function()
-                    local dbg = debug and debug.getinfo and debug.getinfo(iv, "S")
-                    if dbg and dbg.source then
-                        local src = dbg.source:gsub("^@", "")
-                        if #src > 70 then src = "..." .. src:sub(-67) end
-                        info = " [" .. src .. ":" .. tostring(dbg.linedefined or 0) .. "]"
-                    end
-                end)
-                buf[#buf + 1] = "    fn " .. tostring(ik) .. info
-            else
-                buf[#buf + 1] = "    " .. tostring(ik) .. " = " .. _dv(iv, 0, 3)
-            end
-        end
-    end
-
-    local mt = getmetatable(mod)
-    if mt then
-        buf[#buf + 1] = "  METATABLE: " .. _dv(mt, 0, 2)
-    end
-end
-
--- ─── KEY: resolve module via LobbyModuleConfig registry ───────────
-local function resolveViaRegistry(keyName)
-    local mod = nil
-    pcall(function()
-        if _G.ModuleManager and _G.ModuleManager.LobbyModuleConfig and _G.ModuleManager.LobbyModuleConfig[keyName] then
-            local cfg = _G.ModuleManager.LobbyModuleConfig[keyName]
-            local path = cfg.ModuleName
-            mod = _G.ModuleManager.GetModule(cfg) or package.loaded[path]
-            if not mod and path then
-                -- try require
-                local ok, r = pcall(require, path)
-                if ok then mod = r end
-            end
-        end
-    end)
-    return mod
-end
-
--- ─── PET DUMP (v2 — correct paths) ────────────────────────────────
-local function buildPetDumpV2()
-    local b = {}
-    local function w(s) b[#b + 1] = tostring(s) end
-    w("╔═══════════════════════════════════════════════════════════╗")
-    w("║  PET DUMP v2 — REAL PATHS FROM REGISTRY")
-    w("║  " .. os.date("%Y-%m-%d %H:%M:%S"))
-    w("╚═══════════════════════════════════════════════════════════╝")
-    w("")
-
-    -- 1. Registry-based resolution (THE CORRECT WAY)
-    w(string.rep("═", 68))
-    w("REGISTRY-BASED PET MODULE RESOLUTION")
-    w(string.rep("═", 68))
-    local petKeys = {
-        "pet_manager",
-        "logic_pet_privilege_guide",
-        "collect_pet_module",
+-- ─── FAKE SLOT DATA BUILDER ────────────────────────────────────────
+local function makeSlotData(slotType, index, itemID)
+    return {
+        slotType    = slotType,
+        SlotType    = slotType,
+        index       = index,
+        Index       = index,
+        slotIndex   = index,
+        SlotIndex   = index,
+        itemID      = itemID,
+        itemId      = itemID,
+        ItemID      = itemID,
+        resID       = itemID,
+        ResID       = itemID,
+        resId       = itemID,
+        skinID      = itemID,
+        SkinID      = itemID,
+        isUnlocked  = true,
+        bIsUnlocked = true,
+        IsUnlocked  = true,
+        isOwned     = true,
+        bIsOwned    = true,
+        expire_ts   = 0,
+        ExpireTS    = 0,
+        expire_time = 0,
+        ExpireTime  = 0,
+        isPermanent = true,
+        IsPermanent = true,
+        is_expired  = false,
     }
-    for _, keyName in ipairs(petKeys) do
-        w("")
-        w("─── LobbyModuleConfig[" .. keyName .. "] ───")
-        local cfg = nil
-        pcall(function()
-            cfg = _G.ModuleManager and _G.ModuleManager.LobbyModuleConfig
-                and _G.ModuleManager.LobbyModuleConfig[keyName]
-        end)
-        if cfg then
-            w("  cfg.ModuleName = " .. tostring(cfg.ModuleName))
-            w("  cfg.KeyName    = " .. tostring(cfg.KeyName))
-            w("  cfg.ModuleLevel= " .. tostring(cfg.ModuleLevel))
-            local mod = resolveViaRegistry(keyName)
-            if mod then
-                w("  RESOLVED — dumping module:")
-                dumpModule(b, keyName .. " (" .. tostring(cfg.ModuleName) .. ")", mod, true)
-            else
-                w("  RESOLVED → nil (module not instantiated yet)")
-            end
-        else
-            w("  NOT REGISTERED in LobbyModuleConfig")
-        end
-    end
-
-    -- 2. Direct package.loaded scan for pet-related
-    w("")
-    w(string.rep("═", 68))
-    w("SCAN: package.loaded keys matching 'pet' or 'companion'")
-    w(string.rep("═", 68))
-    local hits = {}
-    for k in pairs(package.loaded) do
-        if type(k) == "string" then
-            local lk = k:lower()
-            if lk:find("pet") or lk:find("companion") then
-                hits[#hits + 1] = k
-            end
-        end
-    end
-    table.sort(hits)
-    if #hits == 0 then
-        w("  NONE — pet modules lazy-loaded on first access")
-    else
-        for _, k in ipairs(hits) do
-            w("  found: " .. k)
-            pcall(dumpModule, b, k, package.loaded[k])
-        end
-    end
-
-    -- 3. CDataTable pet tables
-    w("")
-    w(string.rep("═", 68))
-    w("CDataTable — pet/companion tables")
-    w(string.rep("═", 68))
-    pcall(function()
-        local candidates = {
-            "Pet", "PetInfo", "PetSkin", "PetDress", "PetAction", "PetLevel",
-            "PetUpgrade", "PetSkill", "PetAccessory", "PetVoice",
-            "Companion", "CompanionSkin", "CompanionConfig",
-            "Wingman", "WingmanSkin",
-        }
-        for _, tname in ipairs(candidates) do
-            local cfg = CDataTable.GetTable(tname)
-            if cfg then
-                local n = 0; for _ in pairs(cfg) do n = n + 1 end
-                w("  CDataTable[" .. tname .. "] = " .. n .. " entries")
-                local i = 0
-                for id, row in pairs(cfg) do
-                    i = i + 1
-                    if i > 5 then w("    ...(+" .. (n - 5) .. ")"); break end
-                    w("    [" .. tostring(id) .. "] = " .. _dv(row, 0, 3))
-                end
-            else
-                w("  CDataTable[" .. tname .. "] = NOT FOUND")
-            end
-        end
-    end)
-
-    -- 4. DataMgr pet fields
-    w("")
-    w(string.rep("═", 68))
-    w("DataMgr — fields matching pet/companion/wingman")
-    w(string.rep("═", 68))
-    local dmHits = {}
-    if _G.DataMgr then
-        for k, v in pairs(_G.DataMgr) do
-            if type(k) == "string" then
-                local lk = k:lower()
-                if lk:find("pet") or lk:find("companion") or lk:find("wingman") then
-                    dmHits[#dmHits + 1] = k
-                end
-            end
-        end
-    end
-    if #dmHits == 0 then
-        w("  NONE")
-    else
-        table.sort(dmHits)
-        for _, k in ipairs(dmHits) do
-            w("  DataMgr." .. k .. " = " .. _dv(_G.DataMgr[k], 0, 4))
-        end
-    end
-
-    _writeFile("pet_dump_v2_lobby.txt", table.concat(b, "\n"))
 end
 
--- ─── PROFILE EXTENDED DUMP (missing modules from v1) ──────────────
-local function buildProfileExtendedDumpV2()
-    local b = {}
-    local function w(s) b[#b + 1] = tostring(s) end
-    w("╔═══════════════════════════════════════════════════════════╗")
-    w("║  PROFILE EXTENDED DUMP v2 — modules missed in v1")
-    w("║  " .. os.date("%Y-%m-%d %H:%M:%S"))
-    w("╚═══════════════════════════════════════════════════════════╝")
-
-    -- Registry-based resolution for missed modules
-    local registryKeys = {
-        -- Profile frames
-        "logic_roleInfo_profileframe",
-        "logic_roleInfo_socialcardframe",
-        "logic_roleInfo_HonourCertificate",
-        "logic_roleInfo_honor_title_select",
-        "logic_roleInfo_weaponstrength_title_select",
-        -- Real profile path
-        "logic_profile",
-        -- Person space extended
-        "logic_custom_presentation",
-        "logic_personalization_download",
-        "logic_popular_gift_pk",
-        "logic_popular_streak",
-        "logic_popular_pk_result",
-        -- Social lobby
-        "Logic_SocialLobbyModule",
-        "Logic_SocialLobbyEditMgrModule",
-        "logic_module_social_person_space",
-        -- Wardrobe cosmetics
-        "logic_legend_weapon",
-        "LogicMultiItemModule",
-        "LogicParticleEmote",
-        "LobbyIdleUnlock",
-        "logic_outfit_combination",
-        "logic_card_collect_wardrobe_show",
-        "logic_wardrobe_wow_vehicle",
-        "logic_wardrobe_wheel",
-        "logic_wardrobe_tag_mgr",
-        "red_point_manager",
-        "wardrobe_red_point",
-        -- Vehicle extended
-        "LogicVehicleAccessory",
-        "LogicVehicleExtendedFeature",
-        "LogicVehicleDecalExchange",
-        "LogicVehicleResDependencyUtil",
-        "ThemeVehicleManager",
-        "SportCarSystem",
-        "VehicleCollectSystem",
-        "vehicle_collect_manager",
-        "upgradeVehicle",
-        -- Glide
-        "GlideSystem",
-        -- Home/person space
-        "logic_home_entry",
-        "logic_home_status",
-        "logic_home_door_plate",
-        "logic_home_liveTogether_crystal",
-        -- Emote
-        "LobbyEmoteManager",
-        "UniqueEmoteManager",
-        -- Emote/misc
-        "AvatarDataCenter",
-        "AvatarCheckerModule",
-    }
-
-    for _, keyName in ipairs(registryKeys) do
-        w("")
-        w(string.rep("─", 68))
-        w("REGISTRY KEY: " .. keyName)
-        w(string.rep("─", 68))
-        local cfg = nil
-        pcall(function()
-            cfg = _G.ModuleManager and _G.ModuleManager.LobbyModuleConfig
-                and _G.ModuleManager.LobbyModuleConfig[keyName]
-        end)
-        if cfg then
-            w("  ModuleName = " .. tostring(cfg.ModuleName))
-            local mod = resolveViaRegistry(keyName)
-            if mod then
-                dumpModule(b, keyName .. " → " .. tostring(cfg.ModuleName), mod, true)
-            else
-                w("  RESOLVED → nil (not instantiated)")
-                -- Try package.loaded fallback
-                local direct = package.loaded[cfg.ModuleName]
-                if direct then
-                    w("  package.loaded[" .. cfg.ModuleName .. "] EXISTS:")
-                    dumpModule(b, cfg.ModuleName, direct, true)
-                end
-            end
-        else
-            w("  NOT REGISTERED in LobbyModuleConfig")
-        end
+-- ─── WRAP HELPER ───────────────────────────────────────────────────
+local PCU_PFX = "__pslot11_"
+local function wrapFn(tbl, name, wrapper)
+    if not tbl or type(tbl[name]) ~= "function" then return false end
+    if not tbl[PCU_PFX .. name] then
+        tbl[PCU_PFX .. name] = tbl[name]
     end
-
-    _writeFile("profile_extended_v2_lobby.txt", table.concat(b, "\n"))
-end
-
--- ─── FULL REGISTRY SCAN (optional — dumps every registered module) ─
--- ⚠️ This generates a HUGE file. Only run manually.
-_G.PPDumpFullRegistry = function()
-    local b = {}
-    local function w(s) b[#b + 1] = tostring(s) end
-    w("╔═══════════════════════════════════════════════════════════╗")
-    w("║  FULL LobbyModuleConfig REGISTRY DUMP")
-    w("║  " .. os.date("%Y-%m-%d %H:%M:%S"))
-    w("╚═══════════════════════════════════════════════════════════╝")
-
-    local reg = nil
-    pcall(function() reg = _G.ModuleManager and _G.ModuleManager.LobbyModuleConfig end)
-    if not reg then w("  LobbyModuleConfig NOT AVAILABLE"); _writeFile("registry_full_dump.txt", table.concat(b, "\n")); return end
-
-    local keys = {}
-    for k in pairs(reg) do keys[#keys + 1] = k end
-    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-    w("  TOTAL REGISTERED KEYS: " .. #keys)
-
-    for _, k in ipairs(keys) do
-        local cfg = reg[k]
-        w("")
-        w("── " .. k .. " ──")
-        if type(cfg) == "table" then
-            w("   ModuleName  = " .. tostring(cfg.ModuleName))
-            w("   KeyName     = " .. tostring(cfg.KeyName))
-            w("   ModuleLevel = " .. tostring(cfg.ModuleLevel))
-        else
-            w("   cfg = " .. _dv(cfg, 0, 2))
-        end
-    end
-
-    _writeFile("registry_full_dump.txt", table.concat(b, "\n"))
-end
-
--- ─── FIRE ─────────────────────────────────────────────────────────
-local function fire(phase, tag)
-    if _G._PPDUMP2.phases[phase] then return false end
-    if phase ~= "lobby" then return false end
-    if not _G.DataMgr then return false end
-
-    _G._PPDUMP2.phases[phase] = os.time()
-    print("[PPDUMP2] FIRING [" .. phase .. "] (" .. tag .. ")")
-
-    pcall(buildPetDumpV2)
-    pcall(buildProfileExtendedDumpV2)
-
-    print("[PPDUMP2] DONE — check pet_dump_v2_lobby.txt + profile_extended_v2_lobby.txt")
+    tbl[name] = wrapper(tbl[PCU_PFX .. name])
     return true
 end
 
-local function watchTick()
-    local phase = detectPhase()
-    if not phase then return end
-    if phase ~= _G._PPDUMP2.last_state then
-        print("[PPDUMP2] phase: " .. tostring(_G._PPDUMP2.last_state) .. " → " .. phase)
-        _G._PPDUMP2.last_state = phase
-    end
-    if phase == "lobby" and not _G._PPDUMP2.phases.lobby then
-        local key = "_phase_enter_lobby"
-        if not _G._PPDUMP2[key] then
-            _G._PPDUMP2[key] = os.time()
-        elseif (os.time() - _G._PPDUMP2[key]) >= 4 then
-            fire("lobby", "watchdog")
-        end
-    end
-end
+-- ─── MAIN INSTALLER ────────────────────────────────────────────────
+_G.NTHUY2004_InstallProfileSlotsAndLegendaryCar = function()
 
-pcall(function()
-    local p = detectPhase()
-    if p == "lobby" then fire("lobby", "immediate") end
-end)
-
-pcall(function()
-    local ticker = require("common.time_ticker")
-    if ticker and ticker.AddTimerLoop then
-        ticker.AddTimerLoop(0, watchTick, -1, 2.0)
-        print("[PPDUMP2] watcher started (2s)")
+    if not (_G.DX_Settings and _G.DX_Settings.FillProfileSlots == true) then
+        return false
     end
-end)
-
-pcall(function()
-    local function attach()
-        local pc = slua_GameFrontendHUD and slua_GameFrontendHUD:GetPlayerController()
-        if pc and slua.isValid(pc) and pc.AddGameTimer and pc ~= _G._PPDUMP2.pc_attached then
-            _G._PPDUMP2.pc_attached = pc
-            pc:AddGameTimer(2.0, true, watchTick)
-        end
+    if _G.NTHUY2004_ProfileSlotsVer and _G.NTHUY2004_ProfileSlotsVer >= 12 then
+        return true
     end
-    attach()
+
+    local installed = 0
+
+    -- ═══════════════════════════════════════════════════════════════
+    -- 1) LOGIC_SOCIAL_LOBBY_MODULE — main slot system
+    -- ═══════════════════════════════════════════════════════════════
     pcall(function()
-        local ticker = require("common.time_ticker")
-        if ticker and ticker.AddTimerLoop then
-            ticker.AddTimerLoop(0, attach, -1, 5.0)
-        end
-    end)
-end)
+        local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
+        if type(M) ~= "table" then return end
+        local i = M.__inner_impl
+        if type(i) ~= "table" then return end
 
-pcall(function()
-    if EventSystem and EventSystem.registEvent then
-        if EVENTTYPE_LOBBY and EVENTID_SHOW_LOBBY then
-            EventSystem:registEvent(EVENTTYPE_LOBBY, EVENTID_SHOW_LOBBY, function()
-                pcall(function()
-                    local ticker = require("common.time_ticker")
-                    if ticker and ticker.AddTimerOnce then
-                        ticker.AddTimerOnce(4.0, watchTick)
+        -- 1a) GetSlotDataBySlotTypeAndIndex → return fake random data
+        wrapFn(i, "GetSlotDataBySlotTypeAndIndex", function(orig)
+            return function(self, slotType, index, ...)
+                local r = orig(self, slotType, index, ...)
+                if r and type(r) == "table" and (r.itemID or r.ItemID or r.resID) then
+                    -- Slot has data — return orig
+                    return r
+                end
+                -- Empty slot — fill with random based on slotType
+                local stLower = type(slotType) == "string" and slotType:lower() or ""
+                local itemID
+                if stLower:find("pet") then
+                    itemID = pickRandom(PET_POOL, "pet_" .. tostring(index))
+                elseif stLower:find("weapon") or stLower:find("gun") then
+                    itemID = pickRandom(WEAPON_POOL, "gun_" .. tostring(index))
+                elseif stLower:find("vehicle") or stLower:find("car") then
+                    itemID = pickRandom(VEHICLE_POOL, "car_" .. tostring(index))
+                elseif stLower:find("avatar") or stLower:find("show") or stLower:find("bg") then
+                    itemID = pickRandom(AVATAR_POOL, "avatar_" .. tostring(index))
+                else
+                    -- Unknown type — random across pools
+                    local mixed = (math.floor(_G.DX_Settings.ProfileSlotSeed + index) % 3)
+                    if mixed == 0 then itemID = pickRandom(WEAPON_POOL, "mx_" .. tostring(index))
+                    elseif mixed == 1 then itemID = pickRandom(VEHICLE_POOL, "mx_" .. tostring(index))
+                    else itemID = pickRandom(PET_POOL, "mx_" .. tostring(index)) end
+                end
+                if itemID then
+                    return makeSlotData(slotType, index, itemID)
+                end
+                return r
+            end
+        end)
+
+        -- 1b) Slot unlock checks → always true
+        wrapFn(i, "GetSlotIsUnlockedByCollectHallLevel", function(orig)
+            return function(self, slotType, index, ...)
+                return true
+            end
+        end)
+
+        -- 1c) Max count → 999
+        wrapFn(i, "GetSlotTypeMaxCount", function(orig)
+            return function(self, slotType, ...)
+                local r = orig(self, slotType, ...)
+                if type(r) == "number" and r > 0 then return r end
+                return 999
+            end
+        end)
+
+        wrapFn(i, "GetSlotTypeUCUnlockMaxCount", function() return function() return 999 end end)
+        wrapFn(i, "GetSlotTypeUCUnlockedCount",   function() return function() return 999 end end)
+        wrapFn(i, "GetCollectHallLevel",          function() return function() return 999 end end)
+
+        -- 1d) Pet slot clothe → always accept
+        wrapFn(i, "PetSlotEquipClotheItemId", function(orig)
+            return function(self, slotIndex, itemID, ...)
+                return true
+            end
+        end)
+
+        -- 1e) BG wall slot → always accept
+        wrapFn(i, "BGWallSlotEquipItemId", function(orig)
+            return function(self, slotIndex, itemID, ...)
+                return true
+            end
+        end)
+
+        -- 1f) Avatar show slot → always accept
+        wrapFn(i, "AvatarShowSlotEquipItemId", function(orig)
+            return function(self, slotIndex, itemID, ...)
+                return true
+            end
+        end)
+
+        -- 1g) Achievement slot → always accept
+        wrapFn(i, "AchievementSlotEquipItemId", function(orig)
+            return function(self, slotIndex, itemID, ...)
+                return true
+            end
+        end)
+
+        -- 1h) Spotlight → true
+        wrapFn(i, "GetSpotlightIsShow", function() return function() return true end end)
+
+        -- 1i) on_get_collect_hall_data_rsp → inject fake items into response
+        wrapFn(i, "on_get_collect_hall_data_rsp", function(orig)
+            return function(self, data, ...)
+                -- Pre-fill slot data before orig parses
+                if type(data) == "table" then
+                    data.slotData = data.slotData or {}
+                    data.allSlotData = data.allSlotData or {}
+                    -- Seed with random picks
+                    for idx = 1, 6 do
+                        data.slotData[idx] = data.slotData[idx] or makeSlotData("weapon", idx,
+                            pickRandom(WEAPON_POOL, "seed_" .. idx))
                     end
-                end)
-            end)
+                end
+                local ok, err = pcall(orig, self, data, ...)
+                return ok, err
+            end
+        end)
+
+        installed = installed + 1
+        print("[PSLOT11] Logic_SocialLobbyModule patched")
+    end)
+
+    -- ═══════════════════════════════════════════════════════════════
+    -- 2) LOGIC_SOCIAL_LOBBY_EDIT_MGR — block server sync
+    -- ═══════════════════════════════════════════════════════════════
+    pcall(function()
+        local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyEditMgrModule")
+        if type(M) ~= "table" then return end
+        local i = M.__inner_impl
+        if type(i) ~= "table" then return end
+
+        -- SaveEditedData → no-op (don't send to server)
+        wrapFn(i, "SaveEditedData", function(orig)
+            return function(self, ...)
+                -- Local-only: fire fake rsp
+                if i["on_edit_all_collect_hall_rsp"] then
+                    pcall(i["on_edit_all_collect_hall_rsp"], self, 0)
+                end
+                return true
+            end
+        end)
+
+        -- SaveEditData → collect locally only
+        wrapFn(i, "SaveEditData", function(orig)
+            return function(self, ...)
+                return true
+            end
+        end)
+
+        -- All edit-blockers → allow
+        wrapFn(i, "CheckBGWallSlotIfCanEquipItemId", function() return function() return true end end)
+        wrapFn(i, "GetWhetherNeedToSave", function() return function() return false end end)
+        wrapFn(i, "GetSaveFailAfterTriggeredReq", function() return function() return false end end)
+        wrapFn(i, "CheckIsShowUnlockPopup", function() return function() return false end end)
+        wrapFn(i, "ShowExistEditPopup", function() return function() end end)
+        wrapFn(i, "ShowUnlockSlotPopup", function() return function() end end)
+
+        installed = installed + 1
+        print("[PSLOT11] Logic_SocialLobbyEditMgrModule patched")
+    end)
+
+    -- ═══════════════════════════════════════════════════════════════
+    -- 3) THEME VEHICLE MANAGER — legendary car in lobby
+    -- ═══════════════════════════════════════════════════════════════
+    pcall(function()
+        local M = require("client.logic.lobby.ThemeVehicleManager")
+        if type(M) ~= "table" then return end
+        local i = M.__inner_impl
+        if type(i) ~= "table" then return end
+
+        -- GetSelfVehicleIDs → override with legendary
+        wrapFn(i, "GetSelfVehicleIDs", function(orig)
+            return function(self, ...)
+                local r = orig(self, ...)
+                if not _G.DX_Settings.LobbyLegendaryCar then return r end
+                local legend = LEGENDARY_CARS[
+                    (math.floor(_G.DX_Settings.ProfileSlotSeed) % #LEGENDARY_CARS) + 1
+                ]
+                if r and type(r) == "table" then
+                    r[1] = legend
+                    return r
+                end
+                return { legend }
+            end
+        end)
+
+        -- PreviewGarageVehicle → force legendary car preview
+        wrapFn(i, "PreviewGarageVehicle", function(orig)
+            return function(self, vehicleID, ...)
+                if not _G.DX_Settings.LobbyLegendaryCar then
+                    return orig(self, vehicleID, ...)
+                end
+                local legend = LEGENDARY_CARS[
+                    (math.floor(_G.DX_Settings.ProfileSlotSeed) % #LEGENDARY_CARS) + 1
+                ]
+                return orig(self, legend, ...)
+            end
+        end)
+
+        -- _ShowSelfVehicle → force legendary
+        wrapFn(i, "_ShowSelfVehicle", function(orig)
+            return function(self, ...)
+                if not _G.DX_Settings.LobbyLegendaryCar then
+                    return orig(self, ...)
+                end
+                local legend = LEGENDARY_CARS[
+                    (math.floor(_G.DX_Settings.ProfileSlotSeed) % #LEGENDARY_CARS) + 1
+                ]
+                -- Try direct call with legendary
+                local ok, err = pcall(orig, self, legend, ...)
+                if not ok then
+                    return orig(self, ...)
+                end
+                return ok
+            end
+        end)
+
+        -- CheckVehicleTypeHasUnlock → always true
+        wrapFn(i, "CheckVehicleTypeHasUnlock", function() return function() return true end end)
+
+        installed = installed + 1
+        print("[PSLOT11] ThemeVehicleManager patched")
+    end)
+
+    -- ═══════════════════════════════════════════════════════════════
+    -- 4) VEHICLE COLLECT SYSTEM — showcase with legendary
+    -- ═══════════════════════════════════════════════════════════════
+    pcall(function()
+        local M = require("client.logic.vehicle.VehicleCollectSystem")
+        if type(M) ~= "table" then return end
+        local i = M.__inner_impl
+        if type(i) ~= "table" then return end
+
+        wrapFn(i, "GetDefaultShowVehicle", function(orig)
+            return function(self, ...)
+                if not _G.DX_Settings.LobbyLegendaryCar then
+                    return orig(self, ...)
+                end
+                return LEGENDARY_CARS[
+                    (math.floor(_G.DX_Settings.ProfileSlotSeed) % #LEGENDARY_CARS) + 1
+                ]
+            end
+        end)
+
+        wrapFn(i, "GetPreviewVehicleList", function(orig)
+            return function(self, ...)
+                local r = orig(self, ...)
+                if not _G.DX_Settings.LobbyLegendaryCar then return r end
+                if type(r) ~= "table" then r = {} end
+                -- Prepend legendary
+                local legend = LEGENDARY_CARS[
+                    (math.floor(_G.DX_Settings.ProfileSlotSeed) % #LEGENDARY_CARS) + 1
+                ]
+                table.insert(r, 1, legend)
+                return r
+            end
+        end)
+
+        wrapFn(i, "HasUnlockFeature", function() return function() return true end end)
+        wrapFn(i, "HasUnlockFeature2", function() return function() return true end end)
+        wrapFn(i, "IsOpenHighTire", function() return function() return true end end)
+
+        installed = installed + 1
+        print("[PSLOT11] VehicleCollectSystem patched")
+    end)
+
+    -- ═══════════════════════════════════════════════════════════════
+    -- 5) VEHICLE EXTENDED FEATURE — chassis light, wheel hub etc.
+    -- ═══════════════════════════════════════════════════════════════
+    pcall(function()
+        local M = require("client.logic.vehicle.LogicVehicleExtendedFeature")
+        if type(M) ~= "table" then return end
+        local i = M.__inner_impl
+        if type(i) ~= "table" then return end
+
+        wrapFn(i, "CheckVehicleSupportMultiSlot", function() return function() return true end end)
+        wrapFn(i, "CheckIsFeatureItemHasReddot", function() return function() return false end end)
+        wrapFn(i, "CheckHasNewItemReddot", function() return function() return false end end)
+        wrapFn(i, "CheckHasNewItemReddot_AllType", function() return function() return false end end)
+
+        installed = installed + 1
+        print("[PSLOT11] LogicVehicleExtendedFeature patched")
+    end)
+
+    -- ═══════════════════════════════════════════════════════════════
+    -- 6) VEHICLE ACCESSORY — accessories always available
+    -- ═══════════════════════════════════════════════════════════════
+    pcall(function()
+        local M = require("client.logic.vehicle.LogicVehicleAccessory")
+        if type(M) ~= "table" then return end
+        local i = M.__inner_impl
+        if type(i) ~= "table" then return end
+
+        wrapFn(i, "CheckVehicleCanEquipAccessory", function() return function() return true end end)
+        wrapFn(i, "CheckHasGetVehicle", function() return function() return true end end)
+        wrapFn(i, "CheckHasGetAccessoryItem", function() return function() return true end end)
+        wrapFn(i, "CheckIsEquipAccessoryItem", function() return function() return true end end)
+        wrapFn(i, "CheckHasEnoughCost", function() return function() return true end end)
+
+        -- Auto-equip accessory on any vehicle
+        wrapFn(i, "OnGetCarInfoRsp", function(orig)
+            return function(self, ...)
+                local ok, err = pcall(orig, self, ...)
+                return ok, err
+            end
+        end)
+
+        installed = installed + 1
+        print("[PSLOT11] LogicVehicleAccessory patched")
+    end)
+
+    -- ═══════════════════════════════════════════════════════════════
+    -- 7) RESEED COMMAND — call NTHUY2004_ReseedProfileSlots() to shuffle
+    -- ═══════════════════════════════════════════════════════════════
+    _G.NTHUY2004_ReseedProfileSlots = function()
+        _G.DX_Settings.ProfileSlotSeed = os.time() + math.random(1000, 99999)
+        _slotCache = {}
+        print("[PSLOT11] Reseeded with seed=" .. tostring(_G.DX_Settings.ProfileSlotSeed))
+    end
+
+    _G.NTHUY2004_ProfileSlotsVer = 12
+    _G.NTHUY2004_ProfileSlotsInstalled = true
+
+    print("[PSLOT11] Installed — sections: " .. installed)
+    return true
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- AUTO-BOOT
+-- ═══════════════════════════════════════════════════════════════════════════
+pcall(function()
+    local ok, ticker = pcall(require, "common.time_ticker")
+    local function boot()
+        if not (_G.DX_Settings and _G.DX_Settings.FillProfileSlots == true) then
+            return
         end
+        pcall(_G.NTHUY2004_InstallProfileSlotsAndLegendaryCar)
+    end
+
+    if ok and ticker and ticker.AddTimerOnce then
+        for _, d in ipairs({ 1, 3, 8, 15, 25, 40, 60 }) do
+            ticker.AddTimerOnce(d, boot)
+        end
+    else
+        boot()
     end
 end)
 
-_G.PP2Status = function()
-    print("=== PPDUMP2 STATUS ===")
-    print("last_state:", _G._PPDUMP2.last_state or "nil")
-    for p, t in pairs(_G._PPDUMP2.phases) do
-        print("  " .. p .. " → " .. os.date("%H:%M:%S", t))
-    end
-end
-
-_G.PP2Force = function()
-    _G._PPDUMP2.phases.lobby = nil
-    _G._PPDUMP2._phase_enter_lobby = os.time() - 10
-    fire("lobby", "forced")
-end
-
-_G.PP2Reset = function()
-    _G._PPDUMP2.phases = {}
-    _G._PPDUMP2.last_state = nil
-    print("[PPDUMP2] reset")
-end
-
-print("[profile_pet_dump v2] loaded — registry-based, correct paths")
+return true
