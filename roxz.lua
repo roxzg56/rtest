@@ -1,16 +1,9 @@
 -- ═══════════════════════════════════════════════════════════════════
--- v23.1 — SPAWN DISCOVERY
+-- v25 — VEHICLE SPAWN (Focused) + FILE FIX
 -- Path: /storage/emulated/0/Android/data/com.pubg.imobile/files/
 -- ═══════════════════════════════════════════════════════════════════
 
 local DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
-
-local function S(name, content)
-    local f = io.open(DIR .. name, "w")
-    if not f then return false end
-    f:write(content or ""); f:close()
-    return true
-end
 
 local function P(t, m)
     pcall(function()
@@ -25,348 +18,287 @@ local function P(t, m)
     end)
 end
 
-local function V(v, d, m)
-    d, m = d or 0, m or 3
-    if d > m then return "..." end
-    local t = type(v)
-    if t == "nil" or t == "boolean" or t == "number" then return tostring(v) end
-    if t == "string" then return #v > 60 and ('"'..v:sub(1,57)..'..."') or ('"'..v..'"') end
-    if t == "function" then return "<fn>" end
-    if t == "userdata" then return "<ud>" end
-    if t == "table" then
-        local p, i, n = {}, 0, 0
-        for _ in pairs(v) do n = n + 1 end
-        for k, val in pairs(v) do
-            i = i + 1
-            if i > 12 then p[#p+1] = "...(+"..(n-12)..")"; break end
-            p[#p+1] = tostring(k).."="..V(val,d+1,m)
-        end
-        return "{"..table.concat(p,",").."}"
+-- ─── SAVE with verify ─────────────────────────────────────────────
+local function SAVE(name, content)
+    content = content or ""
+    local fullPath = DIR .. name
+    
+    local f, err = io.open(fullPath, "w")
+    if not f then
+        return false, "OPEN FAIL: " .. tostring(err)
     end
-    return "<"..t..">"
+    f:write(content)
+    f:close()
+    
+    -- Verify
+    local vf = io.open(fullPath, "r")
+    if not vf then return false, "READ FAIL" end
+    local readBack = vf:read("*a") or ""
+    vf:close()
+    
+    return true, fullPath .. " (" .. #readBack .. " bytes)"
 end
 
+-- ─── Immediate test ───────────────────────────────────────────────
+local testOK, testInfo = SAVE("v25_test.txt", 
+    "v25 loaded at " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n" ..
+    "DIR: " .. DIR .. "\n" ..
+    "Test: 1234567890\n")
+
+print("[V25] File test: " .. (testOK and "OK" or "FAIL") .. " | " .. tostring(testInfo))
+
 -- ═══════════════════════════════════════════════════════════════════
--- DIAG 1: FULL DUMP ThemeVehicleManager
+-- USER'S OWNED VEHICLES (from your DataMgr dump)
 -- ═══════════════════════════════════════════════════════════════════
-_G.V23Dump = function()
-    local out = {}
-    local function w(s) out[#out+1] = tostring(s) end
-    w("═══ THEME VEHICLE MANAGER DUMP ═══")
-    w("Time: " .. os.date("%Y-%m-%d %H:%M:%S"))
-    w("")
+local USER_OWNED = {
+    {vehicleID = 901, insID = 7373942577173899842},
+    {vehicleID = 908, insID = 7385485150086259305},
+    {vehicleID = 984, insID = 7377277283722326217},
+    {vehicleID = 985, insID = 7377277283722326218},
+}
 
-    local M = require("client.logic.lobby.ThemeVehicleManager")
-    if type(M) ~= "table" then w("NOT LOADED") S("v23_dump.txt", table.concat(out,"\n")) return end
-    w("Module type: table")
-    w("Module keys: " .. (function() local n=0 for _ in pairs(M) do n=n+1 end return n end)())
-    w("")
+-- All known insIDs from vehicleSkinInsIDTable (for any vehicle spawn)
+local ALL_INSIDS = {
+    [960] = 7247538342442672648,
+    [961] = 7247538342442672628,
+    [963] = 7247538342442672644,
+    [901] = 7373942577173899842,
+    [966] = 7247538342442672636,
+    [903] = 7247538342442672621,
+    [904] = 7247538342442672609,
+    [905] = 7247538342442672649,
+    [906] = 7247538342442672645,
+    [907] = 7247538342442672629,
+    [908] = 7247538342442672634,
+    [910] = 7247538342442672623,
+    [911] = 7247538342442672624,
+    [912] = 7247538342442672650,
+    [913] = 7247538342442672627,
+    [915] = 7247538342442672631,
+    [916] = 7247538342442672620,
+    [917] = 7247538342442672611,
+    [918] = 7247538342442672632,
+    [919] = 7247538342442672635,
+    [920] = 7247538342442672625,
+    [930] = 7247538342442672615,
+    [953] = 7247538342442672647,
+    [902] = 7247538342442672640,
+    [967] = 7359790739373563215,
+    [968] = 7392449663798971986,
+    [984] = 7377277283722326217,
+    [985] = 7377277283722326218,
+}
 
-    -- Top level
-    w("── TOP LEVEL FIELDS ──")
-    for k, v in pairs(M) do
-        local vt = type(v)
-        w("  [" .. vt .. "] " .. tostring(k) .. " = " .. V(v, 0, 2))
-    end
-
-    -- Inner impl
-    local i = M.__inner_impl
-    if type(i) ~= "table" then
-        w("__inner_impl NOT TABLE")
-        S("v23_dump.txt", table.concat(out,"\n"))
+-- ═══════════════════════════════════════════════════════════════════
+-- MAIN SPAWN FUNCTION
+-- ═══════════════════════════════════════════════════════════════════
+_G.V25_Spawn = function(vehicleID)
+    vehicleID = vehicleID or 903
+    
+    local insID = ALL_INSIDS[vehicleID]
+    if not insID then
+        P("V25 SPAWN", "No insID for vehicleID " .. tostring(vehicleID))
         return
     end
-    w("")
-    w("── __inner_impl FIELDS ──")
-    local fns, tbls, scals = {}, {}, {}
-    for k, v in pairs(i) do
-        local vt = type(v)
-        if vt == "function" then
-            fns[#fns+1] = k
-        elseif vt == "table" then
-            tbls[#tbls+1] = k
-        else
-            scals[#scals+1] = k
-        end
-    end
-    table.sort(fns, function(a,b) return tostring(a)<tostring(b) end)
-    table.sort(tbls, function(a,b) return tostring(a)<tostring(b) end)
-
-    w("")
-    w("── FUNCTIONS (" .. #fns .. ") ──")
-    for _, k in ipairs(fns) do
-        local info = debug.getinfo(i[k], "S")
-        local src = info and (info.short_src or "?") or "?"
-        local ln = info and info.linedefined or 0
-        w(string.format("  %s  (%s:%d)", tostring(k), tostring(src), ln))
-    end
-
-    w("")
-    w("── TABLES (" .. #tbls .. ") ──")
-    for _, k in ipairs(tbls) do
-        local v = i[k]
-        local n = 0
-        for _ in pairs(v) do n = n + 1 end
-        w(string.format("  %s (size=%d) = %s", tostring(k), n, V(v, 0, 3)))
-    end
-
-    w("")
-    w("── SCALARS (" .. #scals .. ") ──")
-    for _, k in ipairs(scals) do
-        w(string.format("  %s = %s", tostring(k), V(i[k], 0, 2)))
-    end
-
-    -- Also check instance via ModuleManager
-    w("")
-    w("── INSTANCE CHECK ──")
+    
+    local results = {}
+    results[#results+1] = "Target: vID=" .. vehicleID .. " insID=" .. insID
+    
+    -- ═══ APPROACH 1: Set DataMgr.roleData.vst_skin ═══
     pcall(function()
-        local MM = _G.ModuleManager
-        if MM and type(MM.GetModule) == "function" and MM.LobbyModuleConfig then
-            for key, cfg in pairs(MM.LobbyModuleConfig) do
-                if type(cfg) == "table" and tostring(cfg.ModuleName or ""):find("ThemeVehicle") then
-                    w("Found cfg: " .. tostring(key))
-                    local ok, inst = pcall(MM.GetModule, MM, cfg)
-                    w("  GetModule → " .. (ok and type(inst) or "ERR"))
-                    if ok and type(inst) == "table" then
-                        local n = 0
-                        for _ in pairs(inst) do n = n + 1 end
-                        w("  instance keys: " .. n)
-                        -- Check data fields
-                        for _, fn in ipairs({ "Vehicles", "RepeatTags", "_tVehicles",
-                                             "_vehicles", "VehicleList", "curVehicle" }) do
-                            if inst[fn] ~= nil then
-                                w("  inst." .. fn .. " = " .. V(inst[fn], 0, 2))
-                            end
-                        end
-                    end
+        local DM = _G.DataMgr
+        if DM and DM.roleData then
+            DM.roleData.vst_skin = insID
+            results[#results+1] = "✓ Set vst_skin = " .. insID
+        end
+    end)
+    
+    -- ═══ APPROACH 2: Direct call ThemeVehicleManager functions ═══
+    local M = require("client.logic.lobby.ThemeVehicleManager")
+    local i = M and M.__inner_impl
+    if i then
+        -- Try each spawn method with various args
+        local methods = {
+            { "ShowThemeVehicle", vehicleID },
+            { "ShowThemeVehicle", insID },
+            { "ShowThemeVehicle", vehicleID, insID },
+            { "ShowThemeVehicle", {vehicleID = vehicleID, skinID = insID, InsID = insID} },
+            { "_ShowSelfVehicle", vehicleID },
+            { "_ShowSelfVehicle", insID },
+            { "_ShowSelfVehicle", vehicleID, insID },
+            { "_CreateVehicleModel", vehicleID },
+            { "_CreateVehicleModel", insID },
+            { "_CreateVehicleModel", vehicleID, insID },
+            { "_TryCreateVehicleModel", vehicleID },
+            { "PreviewGarageVehicle", vehicleID },
+            { "OnVehicleChange", vehicleID },
+            { "OnGarageVehicleChange", vehicleID },
+        }
+        
+        for _, m in ipairs(methods) do
+            local fnName = m[1]
+            local arg1 = m[2]
+            local arg2 = m[3]
+            if type(i[fnName]) == "function" then
+                local ok, err = pcall(i[fnName], i, arg1, arg2)
+                local status = ok and "OK" or ("ERR: " .. tostring(err):sub(1, 40))
+                results[#results+1] = fnName .. "(" .. tostring(arg1) .. 
+                    (arg2 and (", " .. tostring(arg2)) or "") .. ") = " .. status
+            end
+        end
+    else
+        results[#results+1] = "✗ ThemeVehicleManager NOT loaded"
+    end
+    
+    -- ═══ APPROACH 3: Trigger refresh ═══
+    pcall(function()
+        local M2 = require("client.logic.lobby.ThemeVehicleManager")
+        local i2 = M2 and M2.__inner_impl
+        if i2 then
+            if type(i2.RefreshSpecialEffect) == "function" then
+                pcall(i2.RefreshSpecialEffect, i2)
+                results[#results+1] = "✓ RefreshSpecialEffect"
+            end
+            if type(i2._ReinitShowModelActor) == "function" then
+                pcall(i2._ReinitShowModelActor, i2)
+                results[#results+1] = "✓ _ReinitShowModelActor"
+            end
+            if type(i2.SetVehicleTick) == "function" then
+                pcall(i2.SetVehicleTick, i2, true)
+                results[#results+1] = "✓ SetVehicleTick(true)"
+            end
+        end
+    end)
+    
+    -- ═══ APPROACH 4: EventSystem broadcast ═══
+    pcall(function()
+        if EventSystem and EventSystem.postEvent then
+            -- Try common vehicle refresh events
+            if EVENTTYPE_LOBBY then
+                if EVENTID_UPDATE_LOBBY_VEHICLE then
+                    EventSystem:postEvent(EVENTTYPE_LOBBY, EVENTID_UPDATE_LOBBY_VEHICLE)
+                    results[#results+1] = "✓ Broadcast UPDATE_LOBBY_VEHICLE"
                 end
             end
         end
     end)
-
-    local txt = table.concat(out, "\n")
-    S("v23_dump.txt", txt)
-    P("V23 DUMP", "Saved: v23_dump.txt\n" .. #txt .. " bytes")
+    
+    local txt = table.concat(results, "\n")
+    SAVE("v25_spawn_log.txt", txt)
+    P("V25 SPAWN", txt)
+    return results
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- DIAG 2: TRACE ALL CALLS in ThemeVehicleManager
+-- LOOP THROUGH ALL OWNED VEHICLES
 -- ═══════════════════════════════════════════════════════════════════
-_G._V23TraceLog = {}
-_G._V23TraceActive = false
-
-_G.V23TraceStart = function()
-    if _G._V23TraceActive then P("V23", "Trace already active") return end
-    _G._V23TraceActive = true
-    _G._V23TraceLog = {}
-
-    local function log(s)
-        _G._V23TraceLog[#_G._V23TraceLog+1] = string.format("[%s] %s", os.date("%H:%M:%S"), s)
+_G.V25_TryAll = function()
+    for _, v in ipairs(USER_OWNED) do
+        V25_Spawn(v.vehicleID)
     end
+end
 
-    log("=== TRACE STARTED ===")
-
-    -- Hook ThemeVehicleManager
+-- ═══════════════════════════════════════════════════════════════════
+-- DESTROY
+-- ═══════════════════════════════════════════════════════════════════
+_G.V25_Destroy = function()
     pcall(function()
         local M = require("client.logic.lobby.ThemeVehicleManager")
         local i = M and M.__inner_impl
         if not i then return end
-        for k, fn in pairs(i) do
-            if type(fn) == "function" and type(k) == "string" then
-                local orig = fn
-                i[k] = function(self, ...)
-                    local args = {}
-                    for n = 1, math.min(5, select("#", ...)) do
-                        local v = select(n, ...)
-                        if type(v) == "table" then args[#args+1] = "tbl"
-                        else args[#args+1] = tostring(v):sub(1, 40) end
-                    end
-                    log("TVM:" .. tostring(k) .. "(" .. table.concat(args, ",") .. ")")
-                    local ok, r = pcall(orig, self, ...)
-                    if not ok then
-                        log("  ERR: " .. tostring(r):sub(1, 100))
-                    elseif r ~= nil then
-                        log("  RET: " .. V(r, 0, 1))
-                    end
-                    return r
-                end
-            end
-        end
-        log("Hooked ThemeVehicleManager functions")
+        if type(i.DestoryThemeVehicle) == "function" then i.DestoryThemeVehicle(i) end
+        if type(i.DestroyAllThemeVehiclesOnly) == "function" then i.DestroyAllThemeVehiclesOnly(i) end
     end)
-
-    -- Hook VehicleCollectSystem
-    pcall(function()
-        local M = require("client.logic.vehicle.VehicleCollectSystem")
-        local i = M and M.__inner_impl
-        if not i then return end
-        for k, fn in pairs(i) do
-            if type(fn) == "function" and type(k) == "string" then
-                local orig = fn
-                i[k] = function(self, ...)
-                    local args = {}
-                    for n = 1, math.min(5, select("#", ...)) do
-                        local v = select(n, ...)
-                        if type(v) == "table" then args[#args+1] = "tbl"
-                        else args[#args+1] = tostring(v):sub(1, 40) end
-                    end
-                    log("VCS:" .. tostring(k) .. "(" .. table.concat(args, ",") .. ")")
-                    local ok, r = pcall(orig, self, ...)
-                    if not ok then log("  ERR: " .. tostring(r):sub(1, 100))
-                    elseif r ~= nil then log("  RET: " .. V(r, 0, 1)) end
-                    return r
-                end
-            end
-        end
-        log("Hooked VehicleCollectSystem functions")
-    end)
-
-    -- Hook lobby module
-    pcall(function()
-        local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
-        local i = M and M.__inner_impl
-        if not i then return end
-        for k, fn in pairs(i) do
-            if type(fn) == "function" and type(k) == "string" then
-                local lk = k:lower()
-                if lk:find("vehicle") or lk:find("car") or lk:find("scene") then
-                    local orig = fn
-                    i[k] = function(self, ...)
-                        log("SLM:" .. tostring(k))
-                        local ok, r = pcall(orig, self, ...)
-                        if not ok then log("  ERR: " .. tostring(r):sub(1, 100)) end
-                        return r
-                    end
-                end
-            end
-        end
-        log("Hooked SocialLobbyModule (vehicle-related)")
-    end)
-
-    -- Auto-save every 15s
-    pcall(function()
-        local ticker = require("common.time_ticker")
-        if ticker and ticker.AddTimerLoop then
-            ticker.AddTimerLoop(0, function()
-                if not _G._V23TraceActive then return end
-                pcall(function()
-                    S("v23_trace.txt", table.concat(_G._V23TraceLog, "\n"))
-                end)
-            end, -1, 15.0)
-        end
-    end)
-
-    P("V23 TRACE", "Started. Now:\n1. Go to lobby\n2. Open garage\n3. Select a car\n4. Wait 10s\n5. Then call V23TraceStop()")
-end
-
-_G.V23TraceStop = function()
-    _G._V23TraceActive = false
-    local txt = table.concat(_G._V23TraceLog or {}, "\n")
-    S("v23_trace.txt", txt)
-    P("V23 TRACE", "Saved: v23_trace.txt\nLines: " .. #(_G._V23TraceLog or {}))
+    P("V25", "Car destroyed")
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- DIAG 3: Test spawn with every vehicle ID and see what works
+-- PATCH: Remove vehicle ownership checks (only 5 functions)
 -- ═══════════════════════════════════════════════════════════════════
-_G.V23TestAll = function()
+local PFX = "__v25_"
+local function wrap(mod, name, wrapper)
+    if not mod or type(mod[name]) ~= "function" then return false end
+    if not mod[PFX .. name] then mod[PFX .. name] = mod[name] end
+    mod[name] = wrapper(mod[PFX .. name])
+    return true
+end
+
+local patched = 0
+pcall(function()
     local M = require("client.logic.lobby.ThemeVehicleManager")
     local i = M and M.__inner_impl
-    if not i then P("V23", "Module not loaded") return end
+    if not i then return end
 
-    local testIDs = { 901, 903, 904, 905, 906, 907, 908, 910, 930, 960, 961 }
-    local results = {}
-    for _, vid in ipairs(testIDs) do
-        local fnResults = {}
-        for _, fnName in ipairs({
-            "ShowThemeVehicle", "_ShowSelfVehicle", "_CreateVehicleModel",
-            "_TryCreateVehicleModel", "PreviewGarageVehicle", "OnVehicleChange"
-        }) do
-            if type(i[fnName]) == "function" then
-                local ok, err = pcall(i[fnName], i, vid)
-                fnResults[#fnResults+1] = fnName .. "=" .. (ok and "OK" or "ERR")
-            else
-                fnResults[#fnResults+1] = fnName .. "=NIL"
+    -- Ownership checks — always allow
+    if wrap(i, "CheckVehicleTypeHasUnlock", function(orig)
+        return function(self, ...) return true end
+    end) then patched = patched + 1 end
+
+    if wrap(i, "HaveEnoughVehicleShowSpecial", function(orig)
+        return function(self, ...) return true end
+    end) then patched = patched + 1 end
+
+    if wrap(i, "NeedShowSpecialThemeEffect", function(orig)
+        return function(self, ...) return true end
+    end) then patched = patched + 1 end
+
+    -- Get self vehicle IDs — return user's owned
+    if wrap(i, "GetSelfVehicleIDs", function(orig)
+        return function(self, ...)
+            local r = orig(self, ...)
+            if type(r) == "table" and next(r) then return r end
+            local list = {}
+            for _, v in ipairs(USER_OWNED) do
+                list[#list+1] = v.vehicleID
             end
+            return list
         end
-        results[#results+1] = "ID " .. vid .. ": " .. table.concat(fnResults, " ")
-    end
+    end) then patched = patched + 1 end
 
-    local txt = table.concat(results, "\n")
-    S("v23_test_all.txt", txt)
-    P("V23 TEST ALL", "Check v23_test_all.txt\n" .. #testIDs .. " IDs tested")
-end
-
--- ═══════════════════════════════════════════════════════════════════
--- DIAG 4: What does the game call when opening garage?
--- Check data structures used in spawn
--- ═══════════════════════════════════════════════════════════════════
-_G.V23CheckData = function()
-    local out = {}
-    local function w(s) out[#out+1] = tostring(s) end
-    w("═══ SPAWN DATA CHECK ═══")
-
-    -- DataMgr vehicle-related
-    pcall(function()
-        local DM = _G.DataMgr
-        if DM then
-            for _, k in ipairs({ "roleData", "VehicleSlotList", "vst_skin",
-                                 "vehicleSkinInsIDTable", "defaultVehicleSkinResIDTable",
-                                 "defaultVehicleSkinResID", "curVehicle" }) do
-                if DM[k] ~= nil then
-                    w("DM." .. k .. " = " .. V(DM[k], 0, 3))
-                end
-            end
-            if DM.roleData then
-                for k, v in pairs(DM.roleData) do
-                    local lk = tostring(k):lower()
-                    if lk:find("vehicle") or lk:find("car") or lk:find("vst") then
-                        w("DM.roleData." .. tostring(k) .. " = " .. V(v, 0, 3))
-                    end
-                end
-            end
-        end
-    end)
-
-    -- Check the actual Vehicle UI modules
-    pcall(function()
-        for _, path in ipairs({
-            "client.logic.lobby.GarageThemeSystem",
-            "client.logic.vehicle.SportCarSystem",
-            "client.logic.lobby.LobbyThemeManager",
-            "client.slua.umg.NewSetting.GraphicsNew.LogicFPSAutoAdjust",
-        }) do
-            local ok, M = pcall(require, path)
-            if ok and M ~= nil then
-                w("Module exists: " .. path)
-            end
-        end
-    end)
-
-    local txt = table.concat(out, "\n")
-    S("v23_datacheck.txt", txt)
-    P("V23 DATACHECK", "Saved: v23_datacheck.txt")
-end
+    -- Get valid vehicle num — always enough
+    if wrap(i, "GetValidVehicleNum", function(orig)
+        return function(self, ...) return 999 end
+    end) then patched = patched + 1 end
+end)
 
 -- ═══════════════════════════════════════════════════════════════════
--- Auto-run dump + trace
+-- FINAL REPORT + AUTO-TEST
 -- ═══════════════════════════════════════════════════════════════════
+local report = "v25 REPORT\n" ..
+    "Time: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n" ..
+    "File test: " .. (testOK and "OK" or "FAIL") .. " | " .. tostring(testInfo) .. "\n" ..
+    "Patched: " .. patched .. "\n" ..
+    "User owns " .. #USER_OWNED .. " vehicles\n"
+
+SAVE("v25_report.txt", report)
+
+-- Auto-run spawn attempt in 3 sec
 pcall(function()
     local ticker = require("common.time_ticker")
     if ticker and ticker.AddTimerOnce then
         ticker.AddTimerOnce(3.0, function()
-            pcall(_G.V23Dump)
-        end)
-        ticker.AddTimerOnce(5.0, function()
-            pcall(_G.V23CheckData)
-        end)
-        ticker.AddTimerOnce(8.0, function()
-            pcall(_G.V23TraceStart)
-            P("V23 READY", "Files auto-saved:\n- v23_dump.txt\n- v23_datacheck.txt\n\nTrace active.\n\nGo lobby → open garage.\nWait 10s.\nThen V23TraceStop()")
+            pcall(function()
+                V25_Spawn(901)  -- Try user's owned vehicle first
+            end)
         end)
     end
 end)
 
-print("[V23.1] Discovery loaded. Auto-dump in 3s+5s+8s.")
+-- Initial popup with file test result
+pcall(function()
+    local ticker = require("common.time_ticker")
+    if ticker and ticker.AddTimerOnce then
+        ticker.AddTimerOnce(1.0, function()
+            P("v25 LOADED", 
+                "File test: " .. (testOK and "✓ OK" or "✗ FAIL") .. "\n" ..
+                tostring(testInfo) .. "\n\n" ..
+                "Patched: " .. patched .. "\n\n" ..
+                "3 sec mein auto-spawn hoga:\n" ..
+                "V25_Spawn(901)")
+        end)
+    end
+end)
+
+print("[V25] Loaded. Patched: " .. patched .. ". File test: " .. tostring(testOK))
 
 return true
