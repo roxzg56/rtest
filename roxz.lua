@@ -1,410 +1,354 @@
 -- ═══════════════════════════════════════════════════════════════════
--- PATH-FIXED READER + TRACER + INJECT v3.1
--- All output goes to: /storage/emulated/0/Android/data/com.pubg.imobile/files/
+-- REAL FIX v4 — Bytecode Dump + Popup + Auto-Run
+-- Reason: Source .lua is inside .pak, NOT on disk. Use debug.getinfo
+--         + string.dump to extract bytecode instead.
+-- All output: /storage/emulated/0/Android/data/com.pubg.imobile/files/
 -- ═══════════════════════════════════════════════════════════════════
 
 local DUMP_DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
 
--- ─── FILE WRITE HELPER ─────────────────────────────────────────────
-local function writeDump(name, content)
-    local ok = false
+-- ─── POPUP HELPER ──────────────────────────────────────────────────
+local function POPUP(title, msg)
     pcall(function()
-        local f = io.open(DUMP_DIR .. name, "w")
+        local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
+            or (pcall(require, "client.slua.logic.common.logic_common_msg_box")
+                and require("client.slua.logic.common.logic_common_msg_box"))
+        if Msg and Msg.Show then
+            Msg.Show(1, tostring(title), tostring(msg), 
+                function() end, function() end, "OK", "CLOSE")
+        end
+    end)
+    print("[POPUP] " .. tostring(title) .. " | " .. tostring(msg))
+end
+
+-- ─── WRITE FILE (guaranteed) ───────────────────────────────────────
+local function WRITE(name, content)
+    local fullPath = DUMP_DIR .. name
+    local wrote = false
+    local errMsg = ""
+    pcall(function()
+        local f, err = io.open(fullPath, "w")
         if f then
             f:write(content or "")
             f:close()
-            ok = true
-            print("[DUMP] wrote " .. DUMP_DIR .. name)
+            wrote = true
+        else
+            errMsg = tostring(err or "unknown")
         end
     end)
-    return ok
-end
-
--- ─── SOURCE READER (source files bhi us path se) ───────────────────
-_G.ReadSourceFile = function(relPath, lineStart, lineEnd)
-    -- Clean path
-    local clean = relPath:gsub("^@", ""):gsub("^%.\\", ""):gsub("^%.%/", ""):gsub("\\", "/")
-    
-    local roots = {
-        DUMP_DIR,                              -- primary
-        DUMP_DIR .. "Script/",
-        DUMP_DIR .. "UE4Game/ShadowTrackerExtra/ShadowTrackerExtra/Saved/Paks/",
-        "/sdcard/",
-    }
-    
-    for _, root in ipairs(roots) do
-        local f = io.open(root .. clean, "r")
-        if f then
-            local content = f:read("*a")
-            f:close()
-            if lineStart and lineEnd then
-                local lines = {}
-                local i = 0
-                for line in content:gmatch("[^\n]*") do
-                    i = i + 1
-                    if i >= lineStart and i <= lineEnd then
-                        lines[#lines+1] = string.format("%4d | %s", i, line)
-                    end
-                    if i > lineEnd then break end
-                end
-                return table.concat(lines, "\n"), root .. clean
+    if not wrote then
+        -- Fallback to /sdcard/
+        pcall(function()
+            local altPath = "/sdcard/" .. name
+            local f = io.open(altPath, "w")
+            if f then
+                f:write(content or "")
+                f:close()
+                wrote = true
+                fullPath = altPath
             end
-            return content, root .. clean
-        end
+        end)
     end
-    return nil, nil
+    return wrote, fullPath, errMsg
+end
+
+-- ─── BYTECODE DUMPER ───────────────────────────────────────────────
+-- Extract function bytecode via string.dump, save as .luac for decompiling
+local function dumpFunctionBytecode(fnName, fn, outBuf)
+    if type(fn) ~= "function" then return end
+    local info = debug.getinfo(fn, "S")
+    if not info then return end
+
+    local header = string.format(
+        "── FUNCTION: %s ──\n  source=%s\n  short_src=%s\n  line=%s..%s\n  what=%s\n  nups=%s\n",
+        fnName, tostring(info.source), tostring(info.short_src),
+        tostring(info.linedefined), tostring(info.lastlinedefined),
+        tostring(info.what), tostring(info.nups or 0)
+    )
+    outBuf[#outBuf+1] = header
+
+    -- Dump bytecode
+    local ok, bc = pcall(string.dump, fn)
+    if ok and bc then
+        outBuf[#outBuf+1] = string.format("  BYTECODE SIZE: %d bytes\n", #bc)
+        -- Hex dump first 256 bytes
+        local hex = {}
+        for i = 1, math.min(256, #bc) do
+            hex[#hex+1] = string.format("%02X", bc:byte(i))
+        end
+        outBuf[#outBuf+1] = "  BYTECODE HEX (first 256):\n  " .. table.concat(hex, " ") .. "\n"
+    else
+        outBuf[#outBuf+1] = "  BYTECODE DUMP FAILED (C function)\n"
+    end
+
+    -- Dump constants if LUA 5.1 (getconstants via debug)
+    pcall(function()
+        local consts = {}
+        local i = 1
+        while true do
+            local name, val = debug.getupvalue(fn, i)
+            if not name then break end
+            consts[#consts+1] = "  UP" .. i .. " " .. tostring(name) .. " = " .. 
+                (type(val) == "table" and ("tbl:" .. (next(val) and tostring(next(val)) or "empty")) or tostring(val))
+            i = i + 1
+        end
+        if #consts > 0 then
+            outBuf[#outBuf+1] = "  UPVALUES:\n" .. table.concat(consts, "\n") .. "\n"
+        end
+    end)
+
+    outBuf[#outBuf+1] = "\n"
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 1: SLOT SOURCE READER
+-- MAIN: DUMP SLOT MODULE STRUCTURE
 -- ═══════════════════════════════════════════════════════════════════
-_G.SlotSourceRead = function()
+_G.PSlotDumpAll = function(showPopup)
     local out = {}
     local function w(s) out[#out+1] = tostring(s) end
-    w("═══ SLOT SOURCE READ — " .. os.date("%Y-%m-%d %H:%M:%S") .. " ═══")
-    w("Dump dir: " .. DUMP_DIR)
+
+    w("╔═══════════════════════════════════════════════════════════╗")
+    w("║  PSLOT DUMP v4 — " .. os.date("%Y-%m-%d %H:%M:%S"))
+    w("║  Path: " .. DUMP_DIR)
+    w("╚═══════════════════════════════════════════════════════════╝")
     w("")
 
     local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
-    if type(M) ~= "table" then w("MODULE NOT LOADED"); writeDump("slot_source.txt", table.concat(out, "\n")); return end
+    if type(M) ~= "table" then
+        w("MODULE NOT LOADED")
+        local txt = table.concat(out, "\n")
+        WRITE("pslot_dump.txt", txt)
+        if showPopup then POPUP("PSLOT DUMP", "Module NOT loaded!") end
+        return txt
+    end
     local i = M.__inner_impl
-    if type(i) ~= "table" then w("INNER NOT LOADED"); writeDump("slot_source.txt", table.concat(out, "\n")); return end
-
-    local function dumpFn(fnName)
-        local fn = i[fnName]
-        if type(fn) ~= "function" then
-            w("")
-            w("── " .. fnName .. " : NOT A FUNCTION ──")
-            return
-        end
-        local info = debug.getinfo(fn, "S")
-        if not info then
-            w("")
-            w("── " .. fnName .. " : NO INFO ──")
-            return
-        end
-        w("")
-        w("══════════════════════════════════════════════")
-        w("FUNCTION: " .. fnName)
-        w("  source      = " .. tostring(info.source))
-        w("  short_src   = " .. tostring(info.short_src))
-        w("  linedefined = " .. tostring(info.linedefined))
-        w("  lastdefined = " .. tostring(info.lastlinedefined))
-        w("══════════════════════════════════════════════")
-
-        -- Read the file
-        local src, realPath = _G.ReadSourceFile(info.short_src or info.source)
-        if src then
-            w("  FILE: " .. realPath .. " (" .. #src .. " bytes)")
-            w("")
-            -- Full function body
-            local i3 = 0
-            for line in src:gmatch("[^\n]*") do
-                i3 = i3 + 1
-                if i3 >= info.linedefined and i3 <= info.lastdefined then
-                    w(string.format("%4d | %s", i3, line))
-                end
-                if i3 > info.lastdefined then break end
-            end
-        else
-            w("  FILE NOT READABLE at any root")
-        end
+    if type(i) ~= "table" then
+        w("INNER NOT LOADED")
+        local txt = table.concat(out, "\n")
+        WRITE("pslot_dump.txt", txt)
+        if showPopup then POPUP("PSLOT DUMP", "Inner NOT loaded!") end
+        return txt
     end
 
-    -- Key functions to dump
-    local funcs = {
-        "GetSlotDataBySlotTypeAndIndex",
-        "GetSlotTypeMaxCount",
-        "GetSlotTypeUCUnlockMaxCount",
-        "GetSlotIsUnlockedByCollectHallLevel",
-        "GetCollectHallLevel",
-        "SetCurUId",
-        "GetCurUId",
-        "on_get_collect_hall_data_rsp",
-        "PetSlotEquipClotheItemId",
-        "BGWallSlotEquipItemId",
-        "AvatarShowSlotEquipItemId",
-        "AchievementSlotEquipItemId",
-        "SetCreateModelIndex",
-        "GetCreateModelIndex",
-    }
-
-    for _, fn in ipairs(funcs) do
-        pcall(dumpFn, fn)
-    end
-
-    -- Also dump the module structure
-    w("")
-    w("")
     w("═══ MODULE FIELD INVENTORY ═══")
+    w("")
+    local fnCount, tblCount, scalarCount = 0, 0, 0
+    local funcs = {}
     for k, v in pairs(i) do
         local vt = type(v)
         if vt == "table" then
+            tblCount = tblCount + 1
             local n = 0; for _ in pairs(v) do n = n + 1 end
-            w(string.format("  [table:%d] %s", n, tostring(k)))
+            w(string.format("[tbl:%3d] %s", n, tostring(k)))
         elseif vt == "function" then
+            fnCount = fnCount + 1
+            funcs[#funcs+1] = k
             local info = debug.getinfo(v, "S")
-            local line = info and info.linedefined or "?"
-            local src = info and (info.short_src or "?") or "?"
-            w(string.format("  [fn] %s (line %s in %s)", tostring(k), tostring(line), tostring(src)))
+            w(string.format("[fn]  %s  (line %s of %s)", 
+                tostring(k), 
+                tostring(info and info.linedefined or "?"), 
+                tostring(info and info.short_src or "?")
+            ))
         else
-            w(string.format("  [%s] %s = %s", vt, tostring(k), tostring(v)))
+            scalarCount = scalarCount + 1
+            w(string.format("[%-5s] %s = %s", vt, tostring(k), tostring(v)))
+        end
+    end
+    w("")
+    w(string.format("SUMMARY: %d functions, %d tables, %d scalars", fnCount, tblCount, scalarCount))
+    w("")
+
+    -- Sort functions alphabetically
+    table.sort(funcs)
+
+    -- Dump each function's metadata + bytecode
+    w(string.rep("═", 68))
+    w("FUNCTION BYTECODE DUMP (" .. #funcs .. " functions)")
+    w(string.rep("═", 68))
+    w("")
+
+    for _, fnName in ipairs(funcs) do
+        pcall(dumpFunctionBytecode, fnName, i[fnName], out)
+    end
+
+    -- Also dump the top-level module
+    w(string.rep("═", 68))
+    w("TOP-LEVEL MODULE FUNCTIONS")
+    w(string.rep("═", 68))
+    w("")
+    for k, v in pairs(M) do
+        if type(v) == "function" and type(k) == "string" and not k:match("^__") then
+            pcall(dumpFunctionBytecode, "M." .. tostring(k), v, out)
         end
     end
 
     local txt = table.concat(out, "\n")
-    writeDump("slot_source.txt", txt)
-    print(txt)
+    local ok, path, err = WRITE("pslot_dump.txt", txt)
+
+    if showPopup then
+        if ok then
+            POPUP("✓ PSLOT DUMP SAVED", 
+                "File: pslot_dump.txt\n" ..
+                "Size: " .. #txt .. " bytes\n" ..
+                "Path: com.pubg.imobile/files/\n\n" ..
+                "Functions: " .. fnCount .. "\n" ..
+                "Tables: " .. tblCount
+            )
+        else
+            POPUP("✗ DUMP FAILED", "Error: " .. tostring(err))
+        end
+    end
+
+    print("[PSLOT v4] Dump saved to: " .. tostring(path))
     return txt
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 2: TRACER
+-- RUNTIME TRACER (auto-saves every 30 sec)
 -- ═══════════════════════════════════════════════════════════════════
 _G.TraceSlots = function()
     local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
-    if type(M) ~= "table" then print("[TRACE] Module not loaded") return end
+    if type(M) ~= "table" then return end
     local i = M.__inner_impl
-    if type(i) ~= "table" then print("[TRACE] Inner not loaded") return end
+    if type(i) ~= "table" then return end
 
-    if _G._SlotTraceActive then
+    if _G._STrace then
         print("[TRACE] Already active")
         return
     end
-    _G._SlotTraceActive = true
-    _G._SlotTraceLog = {}
-    _G._SlotTraceStart = os.time()
+    _G._STrace = { log = {}, start = os.time(), count = 0 }
 
-    local function log(line)
-        _G._SlotTraceLog[#_G._SlotTraceLog+1] = 
-            string.format("[%s] %s", os.date("%H:%M:%S"), line)
+    local function log(s)
+        _G._STrace.count = _G._STrace.count + 1
+        local entry = string.format("[%s][%04d] %s", os.date("%H:%M:%S"), _G._STrace.count, s)
+        _G._STrace.log[#_G._STrace.log+1] = entry
+        print("[T] " .. entry)
+        if #_G._STrace.log > 5000 then
+            -- Trim if too big
+            for _ = 1, 1000 do table.remove(_G._STrace.log, 1) end
+        end
     end
 
-    log("=== TRACE STARTED ===")
+    log("TRACE STARTED for Logic_SocialLobbyModule")
 
+    local hooked = 0
     for name, fn in pairs(i) do
-        if type(fn) == "function" and type(name) == "string" 
-           and not name:match("^__") and not name:match("^_t") then
+        if type(fn) == "function" and type(name) == "string" then
             local orig = fn
             i[name] = function(self, ...)
-                local args = {}
-                for n = 1, math.min(3, select("#", ...)) do
+                local argc = select("#", ...)
+                local argStr = ""
+                for n = 1, math.min(argc, 4) do
                     local v = select(n, ...)
                     if type(v) == "table" then
-                        args[#args+1] = "tbl"
+                        argStr = argStr .. "tbl "
                     else
-                        args[#args+1] = tostring(v)
+                        argStr = argStr .. tostring(v):sub(1, 20) .. " "
                     end
                 end
-                log("CALL " .. name .. "(" .. table.concat(args, ",") .. ")")
+                log("CALL " .. name .. "(" .. argStr .. ")")
+
                 local ok, r = pcall(orig, self, ...)
                 if not ok then
-                    log("  ERR " .. name .. " → " .. tostring(r))
+                    log("  ⚠ ERR " .. name .. " → " .. tostring(r):sub(1, 120))
                     return nil
                 end
                 if r ~= nil then
                     if type(r) == "table" then
                         local n = 0; for _ in pairs(r) do n = n + 1 end
-                        log("  RET " .. name .. " → tbl(" .. n .. ")")
+                        log("  ↳ RET tbl(" .. n .. ")")
                     else
-                        log("  RET " .. name .. " → " .. tostring(r))
+                        log("  ↳ RET " .. tostring(r):sub(1, 60))
                     end
                 else
-                    log("  RET " .. name .. " → nil")
+                    log("  ↳ RET nil")
                 end
                 return r
             end
+            hooked = hooked + 1
         end
     end
 
-    log("=== ALL HOOKED. Open profile now. ===")
-    print("[TRACE] Hooked. Open profile/social lobby now, then call DumpTrace()")
+    log("HOOKED " .. hooked .. " functions")
+    print("[TRACE] Hooked " .. hooked .. " functions. Open profile now.")
+
+    -- Auto-save every 30 seconds
+    pcall(function()
+        local ticker = require("common.time_ticker")
+        if ticker and ticker.AddTimerLoop then
+            ticker.AddTimerLoop(0, function()
+                if not _G._STrace then return end
+                pcall(function()
+                    local txt = table.concat(_G._STrace.log, "\n")
+                    WRITE("pslot_trace.txt", txt)
+                end)
+            end, -1, 30.0)
+        end
+    end)
 end
 
-_G.DumpTrace = function()
-    if not _G._SlotTraceLog then print("[TRACE] No trace data") return end
-    _G._SlotTraceLog[#_G._SlotTraceLog+1] = "=== TRACE ENDED ==="
-    local txt = table.concat(_G._SlotTraceLog, "\n")
-    writeDump("slot_trace.txt", txt)
-    print("[TRACE] Wrote " .. #_G._SlotTraceLog .. " lines")
+_G.DumpTrace = function(showPopup)
+    if not _G._STrace then 
+        if showPopup then POPUP("TRACE", "No trace data") end
+        return
+    end
+    local txt = table.concat(_G._STrace.log, "\n")
+    local ok, path = WRITE("pslot_trace.txt", txt)
+    if showPopup then
+        if ok then
+            POPUP("✓ TRACE SAVED", 
+                "Lines: " .. #_G._STrace.log .. "\n" ..
+                "Size: " .. #txt .. " bytes\n" ..
+                "File: pslot_trace.txt")
+        else
+            POPUP("✗ TRACE FAIL", path)
+        end
+    end
     return txt
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- STEP 3: FORCE INJECT (multi-structure)
+-- AUTO-BOOT: dump on load + popup
 -- ═══════════════════════════════════════════════════════════════════
-_G.ForceInjectSlots = function()
-    local M = require("client.slua.logic.lobby.Left.Logic_SocialLobbyModule")
-    if type(M) ~= "table" then print("[FORCE] Module not loaded") return end
-    local i = M.__inner_impl
-    if type(i) ~= "table" then print("[FORCE] Inner not loaded") return end
-
-    local uid = "0"
-    pcall(function()
-        if _G.DataMgr and _G.DataMgr.roleData then
-            uid = tostring(_G.DataMgr.roleData.uid or "0")
-        end
-    end)
-
-    -- Init all missing tables
-    local initTables = {
-        "_tOthersSocialDataMap", "_tSocialDataGetTime", "_tSlotTypeMaxCountMap",
-        "_tUCUnlockSlotMaxCount", "_tWeaponSlotIndex",
-    }
-    for _, tn in ipairs(initTables) do
-        if i[tn] == nil then
-            i[tn] = {}
-            print("[FORCE] Init " .. tn .. " = {}")
-        end
-    end
-    if i._tWeaponSlotIndex and not i._tWeaponSlotIndex[1] then
-        i._tWeaponSlotIndex = { [1] = {}, [2] = {} }
-    end
-
-    -- Real item IDs
-    local SLOT_TYPES = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }
-    local ITEMS = {
-        [1] = { 101001, 101002, 101003, 101004, 101005, 101006 },
-        [2] = { 903, 904, 905, 906, 907, 908 },
-        [3] = { 50008, 50009, 50010, 50017, 50018, 50033 },
-        [4] = { 10008, 10010, 10011, 20010, 20011, 20012 },
-        [5] = { 10008, 10010, 10011, 20010, 20011, 20012 },
-        [6] = { 10008, 10010, 10011, 20010, 20011, 20012 },
-        [7] = { 10008, 10010, 10011, 20010, 20011, 20012 },
-        [8] = { 10008, 10010, 10011, 20010, 20011, 20012 },
-        [9] = { 10008, 10010, 10011, 20010, 20011, 20012 },
-        [10] = { 10008, 10010, 10011, 20010, 20011, 20012 },
-    }
-
-    local function makeSlot(st, idx, itemID)
-        return {
-            slotType = st, SlotType = st, slotTypeID = st, type = st,
-            index = idx, slotIndex = idx, Index = idx, SlotIndex = idx,
-            itemID = itemID, itemId = itemID, ItemID = itemID,
-            resID = itemID, resId = itemID, ResID = itemID,
-            skinID = itemID, skinId = itemID, SkinID = itemID,
-            skin_res_id = itemID, res_id = itemID, resid = itemID,
-            isLock = false, isUnlock = true, isLocked = false, isOwned = true,
-            expire_ts = 0, expire_time = 0, expireTime = 0, isPermanent = true,
-            bIsLock = false, bLock = false, bIsUnlock = true,
-        }
-    end
-
-    -- Build nested structure (by slotType → index)
-    local byType = {}
-    for _, st in ipairs(SLOT_TYPES) do
-        byType[st] = {}
-        local pool = ITEMS[st] or ITEMS[1]
-        for idx = 1, 6 do
-            byType[st][idx] = makeSlot(st, idx, pool[((idx-1) % #pool) + 1])
-        end
-    end
-
-    -- Build flat structure (by index)
-    local flat = {}
-    for idx = 1, 20 do
-        local st = SLOT_TYPES[((idx-1) % #SLOT_TYPES) + 1]
-        local pool = ITEMS[st] or ITEMS[1]
-        flat[idx] = makeSlot(st, idx, pool[((idx-1) % #pool) + 1])
-    end
-
-    -- Build a huge social data object with ALL possible key names
-    local socialData = {
-        uid = uid, UID = uid, playerUID = uid, PlayerUID = uid,
-        slotData = byType, SlotData = byType, slotMap = byType, SlotMap = byType,
-        slots = flat, Slots = flat, slotList = flat, SlotList = flat,
-        allSlotData = flat, AllSlotData = flat,
-        data = byType, Data = byType,
-    }
-
-    -- Inject into every possible location
-    local keys = { uid, tostring(uid), "self", "me", "current", "_self", "SELF", 0, 1, "" }
-    for _, k in ipairs(keys) do
-        i._tOthersSocialDataMap[k] = socialData
-    end
-
-    -- Set max counts
-    for _, st in ipairs(SLOT_TYPES) do
-        i._tSlotTypeMaxCountMap[st] = 6
-        i._tUCUnlockSlotMaxCount[st] = 0
-    end
-
-    -- Set UID
-    pcall(function()
-        if type(i.SetCurUId) == "function" then
-            i.SetCurUId(i, uid)
-        end
-    end)
-
-    -- Fire refresh
-    pcall(function()
-        if type(i.on_get_collect_hall_data_rsp) == "function" then
-            i.on_get_collect_hall_data_rsp(i, socialData)
-        end
-    end)
-
-    local n = 0; for _ in pairs(i._tOthersSocialDataMap) do n = n + 1 end
-    print("[FORCE] Injected. _tOthersSocialDataMap now has " .. n .. " keys")
-    print("[FORCE] MyUID = " .. uid)
+_G.PSlotBoot = function()
+    -- 1. Fire dump
+    local txt = _G.PSlotDumpAll(true)
+    -- 2. Start trace
+    pcall(_G.TraceSlots)
 end
 
--- ═══════════════════════════════════════════════════════════════════
--- STEP 4: CAR SPAWN — all methods tried
--- ═══════════════════════════════════════════════════════════════════
-_G.ForceCarSpawn = function(vehicleID)
-    vehicleID = vehicleID or 903
-    local M = require("client.logic.lobby.ThemeVehicleManager")
-    if type(M) ~= "table" then print("[CAR] Module not loaded") return end
-    local i = M.__inner_impl
-    if type(i) ~= "table" then print("[CAR] Inner not loaded") return end
-
-    if i.Vehicles == nil then i.Vehicles = {} end
-
-    print("[CAR] Attempting spawn vehicleID=" .. tostring(vehicleID))
-
-    local methods = {
-        { "ShowThemeVehicle", vehicleID },
-        { "ShowThemeVehicle", vehicleID, 1 },
-        { "_ShowSelfVehicle", vehicleID },
-        { "_CreateVehicleModel", vehicleID },
-        { "_TryCreateVehicleModel", vehicleID },
-        { "PreviewGarageVehicle", vehicleID },
-        { "OnVehicleChange", vehicleID, 1 },
-        { "OnGarageVehicleChange", vehicleID },
-        { "SetVehicleTick", true },
-    }
-
-    for _, m in ipairs(methods) {
-        local fnName = m[1]
-        local args = { m[2], m[3] }
-        if type(i[fnName]) == "function" then
-            local ok, err = pcall(i[fnName], i, args[1], args[2])
-            print("[CAR] " .. fnName .. " → " .. (ok and "OK" or ("ERR: " .. tostring(err))))
-        else
-            print("[CAR] " .. fnName .. " → NOT A FUNCTION")
-        end
-    end
-
-    -- Also try passing table format
-    pcall(function()
-        if type(i.ShowThemeVehicle) == "function" then
-            i.ShowThemeVehicle(i, { vehicleID = vehicleID, ID = vehicleID })
-        end
-    end)
-end
-
--- ═══════════════════════════════════════════════════════════════════
--- AUTO-RUN
--- ═══════════════════════════════════════════════════════════════════
+-- Auto-run after 5 seconds (game has loaded module by then)
 pcall(function()
     local ticker = require("common.time_ticker")
     if ticker and ticker.AddTimerOnce then
         ticker.AddTimerOnce(5.0, function()
-            pcall(_G.SlotSourceRead)
+            pcall(_G.PSlotBoot)
         end)
     end
 end)
 
-print("[PATH-FIX v3.1] Loaded. Dumps go to: " .. DUMP_DIR)
+-- Also do immediate test-write to confirm path works
+pcall(function()
+    local testOK, testPath = WRITE("_pslot_test.txt", 
+        "LOADED at " .. os.date("%Y-%m-%d %H:%M:%S") .. "\nPath OK: " .. DUMP_DIR)
+    if testOK then
+        print("[PATH TEST] ✓ Write OK: " .. testPath)
+    else
+        print("[PATH TEST] ✗ Write FAILED to: " .. DUMP_DIR)
+        -- Try to alert user
+        pcall(function()
+            local ticker = require("common.time_ticker")
+            if ticker and ticker.AddTimerOnce then
+                ticker.AddTimerOnce(3.0, function()
+                    POPUP("⚠ PATH WARNING", 
+                        "Could not write to:\n" .. DUMP_DIR .. "\n" ..
+                        "Check storage permission.")
+                end)
+            end
+        end)
+    end
+end)
+
+print("[PSLOT v4] Loaded. Auto-dump will fire in 5s. Files → " .. DUMP_DIR)
 
 return true
