@@ -1,7 +1,7 @@
 -- ═══════════════════════════════════════════════════════════════════
--- v35 — FAKE DROP TRIGGER (Born Island)
--- Target: BornIslandAirDropSystem.CreateAirDrop
--- Path: /storage/emulated/0/Android/data/com.pubg.imobile/files/
+-- v36 — BORNISLAND FAKE VEHICLE DROP (Client Visual Only)
+-- Target: MiniTVActor + ThemeVehicleManager (lobby-render layer)
+-- Own nahi vehicle bhi show hogi — pure client memory injection
 -- ═══════════════════════════════════════════════════════════════════
 
 local DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
@@ -16,278 +16,310 @@ end
 local function P(t, m)
     pcall(function()
         local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
-            or (pcall(require, "client.slua.logic.common.logic_common_msg_box")
-                and require("client.slua.logic.common.logic_common_msg_box"))
         if Msg and Msg.Show then
             Msg.Show(1, tostring(t), tostring(m), function() end, function() end, "OK", "CLOSE")
         end
     end)
 end
 
--- ═══════════════════════════════════════════════════════════════════
--- CONFIG
--- ═══════════════════════════════════════════════════════════════════
 local CFG = {
-    vehicleID = 902,           -- Coupe RB
-    skinResID = 1961014,       -- McLaren 570S Royal Black
-    insID = 7247538342442672640,
-    dropX = 0, dropY = 0, dropZ = 100,   -- drop location (0,0 = player pos)
-    dropDelay = 3.0,           -- seconds after trigger
-    autoTrigger = false,       -- auto fire on born island entry
+    vehicleID = 902,
+    skinResID = 1961014,
+    insID     = 7247538342442672640,
+    dropDelay = 3.0,
+    dropHeight = 100,
+    autoRevert = 12.0,
 }
 
-S("v35_config.txt",
-    "v35 Fake Drop Config\n" ..
+S("v36_config.txt",
+    "v36 BornIsland Fake Drop\n" ..
     "vehicleID = " .. CFG.vehicleID .. "\n" ..
     "skinResID = " .. CFG.skinResID .. "\n" ..
-    "insID = " .. CFG.insID .. "\n" ..
-    "dropX/Y/Z = " .. CFG.dropX .. "/" .. CFG.dropY .. "/" .. CFG.dropZ .. "\n"
-)
+    "insID = " .. CFG.insID .. "\n")
 
 -- ═══════════════════════════════════════════════════════════════════
--- BUILD DROP DATA (what CreateAirDrop expects)
+-- STEP 1: DataMgr fake injection (own nahi vehicle)
 -- ═══════════════════════════════════════════════════════════════════
-local function buildDropData()
-    -- Get player position for drop
-    local px, py, pz = 0, 0, CFG.dropZ
-    pcall(function()
-        local GD = require("GameLua.GameCore.Data.GameplayData")
-        local ch = GD.GetPlayerCharacter and GD.GetPlayerCharacter()
-        if ch and slua.isValid(ch) and ch.K2_GetActorLocation then
-            local loc = ch:K2_GetActorLocation()
-            if loc then px, py, pz = loc.X, loc.Y, loc.Z + CFG.dropZ end
-        end
-    end)
+local _original = {}
 
-    return {
-        -- Common drop data fields (both naming conventions)
-        itemID = CFG.skinResID,
-        ItemID = CFG.skinResID,
-        skinID = CFG.skinResID,
-        SkinID = CFG.skinResID,
-        vehicleID = CFG.vehicleID,
-        VehicleID = CFG.vehicleID,
-        insID = CFG.insID,
-        InsID = CFG.insID,
-        posX = CFG.dropX ~= 0 and CFG.dropX or px,
-        posY = CFG.dropY ~= 0 and CFG.dropY or py,
-        posZ = CFG.dropZ,
-        x = CFG.dropX ~= 0 and CFG.dropX or px,
-        y = CFG.dropY ~= 0 and CFG.dropY or py,
-        z = CFG.dropZ,
-        -- Meta
-        dropType = 1,
-        DropType = 1,
-        source = "special",
-        Source = "special",
-        isVehicle = true,
-        IsVehicle = true,
-        isSpecial = true,
-        IsSpecial = true,
-    }
+local function injectFakeVehicleData()
+    local DataMgr = package.loaded["client.logic.data.DataMgr"]
+        or (pcall(require, "client.logic.data.DataMgr") and require("client.logic.data.DataMgr"))
+    if not DataMgr then return false end
+
+    _original.VehicleSlotList = DataMgr.VehicleSlotList
+    _original.vehicleSkinInsIDTable = DataMgr.vehicleSkinInsIDTable
+    _original.defaultVehicleSkinResIDTable = DataMgr.defaultVehicleSkinResIDTable
+
+    DataMgr.VehicleSlotList = DataMgr.VehicleSlotList or {}
+    DataMgr.VehicleSlotList[CFG.vehicleID] = { [1] = CFG.insID }
+
+    DataMgr.vehicleSkinInsIDTable = DataMgr.vehicleSkinInsIDTable or {}
+    DataMgr.vehicleSkinInsIDTable[CFG.vehicleID] = CFG.insID
+
+    DataMgr.defaultVehicleSkinResIDTable = DataMgr.defaultVehicleSkinResIDTable or {}
+    DataMgr.defaultVehicleSkinResIDTable[CFG.vehicleID] = CFG.skinResID
+
+    if DataMgr.roleData then
+        DataMgr.roleData.vst_skin = CFG.insID
+    end
+    return true
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- TRIGGER: Call CreateAirDrop directly
+-- STEP 2: ThemeVehicleManager — RepeatTags/Vehicles/SkinCache init
+--         (yeh v29 ka miss tha, SkinCache missing tha)
 -- ═══════════════════════════════════════════════════════════════════
-_G.V35_TriggerDrop = function()
+local function patchThemeVehicleManager()
+    local M = package.loaded["client.logic.lobby.ThemeVehicleManager"]
+        or (pcall(require, "client.logic.lobby.ThemeVehicleManager")
+            and require("client.logic.lobby.ThemeVehicleManager"))
+    if not M then return false end
+
+    M.RepeatTags = M.RepeatTags or {}
+    M.Vehicles = M.Vehicles or {}
+    M.SkinCache = M.SkinCache or {}     -- ← v29 me yeh missing tha
+    M.ModelActorCache = M.ModelActorCache or {}
+
+    -- GetSelfVehicleInfo — fake slot 1 return
+    if not _original.GetSelfVehicleInfo and M.GetSelfVehicleInfo then
+        _original.GetSelfVehicleInfo = M.GetSelfVehicleInfo
+    end
+    if _original.GetSelfVehicleInfo then
+        M.GetSelfVehicleInfo = function(self)
+            return {
+                [1] = { ItemID = CFG.skinResID, Source = 0, InsID = CFG.insID },
+                [2] = {}, [3] = {}, [4] = {},
+                [5] = {}, [6] = {}, [7] = {},
+            }
+        end
+    end
+    return true
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 3: Spawn fake vehicle model (lobby-render layer works even
+--         in BornIsland match — same UE actor pool)
+-- ═══════════════════════════════════════════════════════════════════
+local function spawnFakeVehicle()
+    local M = package.loaded["client.logic.lobby.ThemeVehicleManager"]
+    if not M then return false end
+
+    pcall(function() M:ShowThemeVehicle(CFG.vehicleID) end)
+    pcall(function() M:_ShowSelfVehicle(CFG.vehicleID, CFG.insID) end)
+    pcall(function() M:_ReinitShowModelActor() end)
+    pcall(function() M:RefreshSpecialEffect() end)
+    pcall(function() M:SetVehicleTick(true) end)
+    return true
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 4: Fake drop visual — MiniTVActor se airdrop sequence
+--         (asli drop isi actor se render hota hai)
+-- ═══════════════════════════════════════════════════════════════════
+local function fireDropVisual()
     local results = {}
 
-    -- 1. Get module
-    local M = package.loaded["GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem"]
-    if not M then
-        local ok, r = pcall(require, "GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem")
-        if ok then M = r end
-    end
-    if type(M) ~= "table" then
-        P("V35", "BornIslandAirDropSystem not loaded")
-        return
+    local MT = package.loaded["client.lobby_ue_object.Actor.MiniTV.MiniTVActor"]
+        or (pcall(require, "client.lobby_ue_object.Actor.MiniTV.MiniTVActor")
+            and require("client.lobby_ue_object.Actor.MiniTV.MiniTVActor"))
+
+    if not MT then
+        results[#results+1] = "MiniTVActor not loaded"
+        return results
     end
 
-    local i = M.__inner_impl
-    if type(i) ~= "table" then
-        P("V35", "No __inner_impl")
-        return
-    end
-
-    results[#results+1] = "Module found"
-
-    -- 2. Check if instance exists (may need SubsystemMgr)
-    local inst = nil
+    local inst = MT
+    -- Try to find live instance via package table
     pcall(function()
-        local SubMgr = require("GameLua.GameCore.Module.Subsystem.SubsystemMgr")
-        if SubMgr and type(SubMgr.Get) == "function" then
-            inst = SubMgr:Get("BornIslandAirDropSystem")
+        if MT.__inner_impl then inst = MT.__inner_impl end
+    end)
+
+    local function try(name, ...)
+        if type(inst[name]) ~= "function" then
+            results[#results+1] = name .. " = missing"
+            return
+        end
+        local ok, err = pcall(inst[name], inst, ...)
+        results[#results+1] = name .. " = " .. (ok and "OK" or ("ERR: " .. tostring(err):sub(1,60)))
+    end
+
+    -- Actual drop animation path (order matters, v31 confirmed):
+    try("SetDropHigh", CFG.dropHeight)
+    try("PlayAirDropAnimEvent")
+    try("DropEvent")
+    try("TryFloatOrDrop")
+
+    return results
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 5: UI airdrop mesh (container + smoke visual)
+-- ═══════════════════════════════════════════════════════════════════
+local function fireAirdropMesh()
+    local results = {}
+    local UM = package.loaded["client.slua.umg.LuckyAirDrop.ui_airdrop_mesh"]
+        or (pcall(require, "client.slua.umg.LuckyAirDrop.ui_airdrop_mesh")
+            and require("client.slua.umg.LuckyAirDrop.ui_airdrop_mesh"))
+    if not UM then
+        results[#results+1] = "ui_airdrop_mesh not loaded"
+        return results
+    end
+
+    pcall(function() UM.Create() end)
+    pcall(function() UM.CreateBox() end)
+    pcall(function() UM.ShowBox() end)
+    pcall(function() UM.ChangeSkin(CFG.skinResID) end)
+    results[#results+1] = "mesh visual fired"
+    return results
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- STEP 6: Revert (detection-safe cleanup)
+-- ═══════════════════════════════════════════════════════════════════
+local function revertAll()
+    local DataMgr = package.loaded["client.logic.data.DataMgr"]
+    if DataMgr then
+        if _original.VehicleSlotList then DataMgr.VehicleSlotList = _original.VehicleSlotList end
+        if _original.vehicleSkinInsIDTable then DataMgr.vehicleSkinInsIDTable = _original.vehicleSkinInsIDTable end
+        if _original.defaultVehicleSkinResIDTable then DataMgr.defaultVehicleSkinResIDTable = _original.defaultVehicleSkinResIDTable end
+    end
+    local M = package.loaded["client.logic.lobby.ThemeVehicleManager"]
+    if M and _original.GetSelfVehicleInfo then
+        M.GetSelfVehicleInfo = _original.GetSelfVehicleInfo
+    end
+    S("v36_revert.txt", "Reverted at " .. os.date("%H:%M:%S"))
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- MAIN: Fake Drop Trigger
+-- ═══════════════════════════════════════════════════════════════════
+_G.V36_FireDrop = function()
+    local log = {}
+    log[#log+1] = "=== v36 FIRE DROP START ==="
+    log[#log+1] = "Vehicle: " .. CFG.vehicleID .. " | Skin: " .. CFG.skinResID
+
+    -- 1. Inject fake data
+    if injectFakeVehicleData() then log[#log+1] = "DataMgr injected" 
+    else log[#log+1] = "DataMgr FAIL" end
+
+    -- 2. Patch ThemeVehicleManager (with SkinCache)
+    if patchThemeVehicleManager() then log[#log+1] = "ThemeVehicleManager patched"
+    else log[#log+1] = "ThemeVehicleManager FAIL" end
+
+    -- 3. Spawn model
+    if spawnFakeVehicle() then log[#log+1] = "Model spawn called" end
+
+    -- 4. Drop animation
+    for _, r in ipairs(fireDropVisual()) do log[#log+1] = "  " .. r end
+
+    -- 5. Container visual
+    for _, r in ipairs(fireAirdropMesh()) do log[#log+1] = "  " .. r end
+
+    -- 6. Auto-revert
+    pcall(function()
+        local ticker = require("common.time_ticker")
+        if ticker and ticker.AddTimerOnce then
+            ticker.AddTimerOnce(CFG.autoRevert, revertAll)
+            log[#log+1] = "Revert scheduled +" .. CFG.autoRevert .. "s"
         end
     end)
 
-    if not inst then
-        -- Try module-level i as instance
-        inst = i
-        results[#results+1] = "Using module class as instance"
-    else
-        results[#results+1] = "Got real instance from SubsystemMgr"
-    end
-
-    -- 3. Build drop data
-    local dropData = buildDropData()
-    results[#results+1] = "Drop data built"
-
-    -- 4. Call CreateAirDrop
-    if type(inst.CreateAirDrop) == "function" then
-        -- Try multiple argument styles
-        local tries = {
-            { "dropData only", function() return inst:CreateAirDrop(dropData) end },
-            { "no args", function() return inst:CreateAirDrop() end },
-            { "self + dropData", function() return inst.CreateAirDrop(inst, dropData) end },
-            { "self only", function() return inst.CreateAirDrop(inst) end },
-        }
-
-        for _, t in ipairs(tries) do
-            local ok, err = pcall(t[2])
-            results[#results+1] = t[1] .. " = " .. (ok and "OK" or ("ERR: " .. tostring(err):sub(1, 60)))
-            if ok then break end
-        end
-    else
-        results[#results+1] = "CreateAirDrop not a function"
-    end
-
-    -- 5. Also try InitConfig + StartFight to prep
-    pcall(function()
-        if type(inst.InitConfig) == "function" then
-            inst:InitConfig()
-            results[#results+1] = "InitConfig called"
-        end
-    end)
-
-    pcall(function()
-        if type(inst.StartFight) == "function" then
-            inst:StartFight()
-            results[#results+1] = "StartFight called"
-        end
-    end)
-
-    local txt = table.concat(results, "\n")
-    S("v35_trigger.txt", txt)
-    P("V35 TRIGGER", txt)
+    log[#log+1] = "=== END ==="
+    local txt = table.concat(log, "\n")
+    S("v36_trigger.txt", txt)
+    P("v36 FAKE DROP", txt)
     return txt
 end
 
--- ═══════════════════════════════════════════════════════════════════
--- LIVE TRACE — capture real drop when it happens
--- ═══════════════════════════════════════════════════════════════════
-_G._V35_TraceLog = {}
-_G._V35_TraceActive = false
+-- Manual revert
+_G.V36_Revert = revertAll
 
-_G.V35_TraceStart = function()
-    if _G._V35_TraceActive then
-        P("V35", "Already tracing")
-        return
-    end
-    _G._V35_TraceActive = true
-    _G._V35_TraceLog = {}
+-- ═══════════════════════════════════════════════════════════════════
+-- TRACE (capture asli drop sequence for reference)
+-- ═══════════════════════════════════════════════════════════════════
+_G._V36_TraceLog = {}
+_G._V36_TraceActive = false
 
+_G.V36_TraceStart = function()
+    _G._V36_TraceActive = true
+    _G._V36_TraceLog = {}
     local function log(s)
-        _G._V35_TraceLog[#_G._V35_TraceLog+1] = 
-            string.format("[%s] %s", os.date("%H:%M:%S"), s)
+        _G._V36_TraceLog[#_G._V36_TraceLog+1] = string.format("[%s] %s", os.date("%H:%M:%S"), s)
     end
-
     log("=== TRACE START ===")
 
-    -- Hook all functions of BornIslandAirDropSystem
-    pcall(function()
-        local M = require("GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem")
-        local i = M and M.__inner_impl
-        if type(i) ~= "table" then return end
-
-        for name, fn in pairs(i) do
-            if type(fn) == "function" and type(name) == "string" then
-                local orig = fn
-                i[name] = function(self, ...)
-                    -- Log args
-                    local args = {}
-                    for n = 1, math.min(5, select("#", ...)) do
-                        local v = select(n, ...)
-                        if type(v) == "table" then
-                            local tblStr = "{"
-                            local cnt = 0
-                            for k, val in pairs(v) do
-                                cnt = cnt + 1
-                                if cnt > 8 then tblStr = tblStr .. "..." break end
-                                tblStr = tblStr .. tostring(k) .. "=" .. tostring(val):sub(1, 30) .. ", "
-                            end
-                            args[#args+1] = tblStr .. "}"
-                        else
-                            args[#args+1] = tostring(v):sub(1, 40)
-                        end
+    -- Hook MiniTVActor + ui_airdrop_mesh
+    for _, path in ipairs({
+        "client.lobby_ue_object.Actor.MiniTV.MiniTVActor",
+        "client.slua.umg.LuckyAirDrop.ui_airdrop_mesh",
+        "client.slua.logic.luck_airdrop.logic_luck_air_drop",
+        "GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem",
+    }) do
+        pcall(function()
+            local M = package.loaded[path]
+            if type(M) ~= "table" then return end
+            local impl = M.__inner_impl or M
+            for name, fn in pairs(impl) do
+                if type(fn) == "function" and type(name) == "string" then
+                    local orig = fn
+                    impl[name] = function(self, ...)
+                        log("CALL " .. name .. "(" .. tostring(select("#", ...)) .. " args)")
+                        local ok, r = pcall(orig, self, ...)
+                        if not ok then log("  ✗ " .. tostring(r):sub(1,120)) end
+                        return r
                     end
-                    log("CALL " .. name .. "(" .. table.concat(args, ", ") .. ")")
-                    local ok, r = pcall(orig, self, ...)
-                    if not ok then
-                        log("  ✗ ERR: " .. tostring(r):sub(1, 200))
-                    elseif r ~= nil then
-                        log("  ↳ RET: " .. tostring(r):sub(1, 100))
-                    end
-                    return r
                 end
             end
-        end
-        log("Hooked all functions")
-    end)
+            log("Hooked " .. path)
+        end)
+    end
 
-    -- Auto-save
     pcall(function()
         local ticker = require("common.time_ticker")
         if ticker and ticker.AddTimerLoop then
             ticker.AddTimerLoop(0, function()
-                if _G._V35_TraceActive and #_G._V35_TraceLog > 0 then
-                    S("v35_trace.txt", table.concat(_G._V35_TraceLog, "\n"))
+                if _G._V36_TraceActive and #_G._V36_TraceLog > 0 then
+                    S("v36_trace.txt", table.concat(_G._V36_TraceLog, "\n"))
                 end
             end, -1, 8.0)
         end
     end)
 
-    P("V35 TRACE", "Trace ON.\n\n1. Match kholo\n2. Spawn island pe wait\n3. Drop aane tak\n4. V35_TraceStop()")
+    P("v36 TRACE", "Trace ON.\nBornIsland match kholo.\nDrop aane tak wait.\nV36_TraceStop()")
 end
 
-_G.V35_TraceStop = function()
-    _G._V35_TraceActive = false
-    local txt = table.concat(_G._V35_TraceLog or {}, "\n")
-    S("v35_trace.txt", txt)
-    P("V35 STOP", "Saved: v35_trace.txt\nLines: " .. #(_G._V35_TraceLog or {}))
+_G.V36_TraceStop = function()
+    _G._V36_TraceActive = false
+    S("v36_trace.txt", table.concat(_G._V36_TraceLog or {}, "\n"))
+    P("v36 STOP", "Saved: v36_trace.txt\nLines: " .. #(_G._V36_TraceLog or {}))
 end
 
 -- ═══════════════════════════════════════════════════════════════════
 -- AUTO-BOOT
 -- ═══════════════════════════════════════════════════════════════════
-pcall(function()
-    local ticker = require("common.time_ticker")
-    if ticker and ticker.AddTimerOnce then
-        ticker.AddTimerOnce(3.0, function()
-            pcall(_G.V35_TraceStart)
-        end)
-    end
-end)
-
-S("v35_report.txt",
-    "v35 REPORT\n" ..
+S("v36_report.txt",
+    "v36 REPORT\n" ..
     "Time: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n" ..
-    "Target: BornIslandAirDropSystem.CreateAirDrop\n" ..
-    "Vehicle: " .. CFG.vehicleID .. " | Skin: " .. CFG.skinResID .. "\n" ..
-    "\nCommands:\n" ..
-    "  V35_TriggerDrop()  -- manual trigger\n" ..
-    "  V35_TraceStart()   -- start trace\n" ..
-    "  V35_TraceStop()    -- save trace\n"
-)
+    "Target: MiniTVActor + ThemeVehicleManager (client visual)\n" ..
+    "Vehicle: " .. CFG.vehicleID .. " | Skin: " .. CFG.skinResID .. "\n\n" ..
+    "Commands:\n" ..
+    "  V36_FireDrop()    -- fire fake drop\n" ..
+    "  V36_Revert()      -- manual revert\n" ..
+    "  V36_TraceStart()  -- start trace\n" ..
+    "  V36_TraceStop()   -- save trace\n")
 
-P("v35 LOADED",
-    "Fake Drop Ready\n\n" ..
+print("[v36] Loaded. V36_FireDrop() to fire.")
+
+P("v36 LOADED",
+    "BornIsland Fake Drop Ready\n\n" ..
     "Vehicle: " .. CFG.vehicleID .. "\n" ..
     "Skin: " .. CFG.skinResID .. "\n\n" ..
-    "Trace auto-start 3s baad.\n" ..
-    "Match start karo, spawn island pe.\n" ..
-    "15-20 sec baad V35_TraceStop()")
-
-print("[V35] Loaded. Trace auto-start in 3s.")
+    "BornIsland match me:\n" ..
+    "  V36_FireDrop()\n\n" ..
+    "Aur drop aane pe:\n" ..
+    "  V36_TraceStart() pehle\n" ..
+    "  Drop dekho, phir\n" ..
+    "  V36_TraceStop()")
 
 return true
