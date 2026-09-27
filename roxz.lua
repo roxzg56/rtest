@@ -1,6 +1,8 @@
 -- ═══════════════════════════════════════════════════════════════════
--- v32 — GRAND DEBUT DUMP + TRACE
--- Target: Vehicle Mod System + Grand Debut box opening animation
+-- v33 — MATCH EVENT DUMPER + PHASE TRACE
+-- Search: spawn island, plane, drop, crate modules
+-- Detect: match phase
+-- Trace: full runtime during match start → drop event
 -- Path: /storage/emulated/0/Android/data/com.pubg.imobile/files/
 -- ═══════════════════════════════════════════════════════════════════
 
@@ -39,7 +41,7 @@ local function V(v, d, m)
         for _ in pairs(v) do n = n + 1 end
         for k, val in pairs(v) do
             i = i + 1
-            if i > 15 then p[#p+1] = "...(+"..(n-15)..")"; break end
+            if i > 12 then p[#p+1] = "...(+"..(n-12)..")"; break end
             p[#p+1] = tostring(k).."="..V(val,d+1,m)
         end
         return "{"..table.concat(p,",").."}"
@@ -48,32 +50,43 @@ local function V(v, d, m)
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- DUMP 1: SEARCH — Vehicle Mod System modules
+-- PART 1: MATCH EVENT MODULES SEARCH
 -- ═══════════════════════════════════════════════════════════════════
-_G.V32_Dump1_SearchModules = function()
+_G.V33_SearchModules = function()
     local out = {}
     local function w(s) out[#out+1] = tostring(s) end
     w("╔═══════════════════════════════════════════════════════════╗")
-    w("║  VEHICLE MOD SYSTEM — MODULE SEARCH")
-    w("║  Time: " .. os.date("%Y-%m-%d %H:%M:%S"))
+    w("║  MATCH EVENT MODULES SEARCH")
+    w("║  " .. os.date("%Y-%m-%d %H:%M:%S"))
     w("╚═══════════════════════════════════════════════════════════╝")
     w("")
 
     local KEYWORDS = {
-        "vehiclemod", "modsystem", "granddebut", "debut",
-        "vehiclemodify", "carmod", "collectionreward",
-        "collectreward", "unlockreward", "vehiclecollect",
-        "vehicleunlock", "premiumvehicle", "tierreward",
+        -- Phases
+        "spawnisland", "spawn_island", "spawnisland", "island",
+        "planeflight", "plane_flight", "plane", "aircraft", "cargo",
+        "freefall", "free_fall", "parachute", "parachuting",
+        "matchphase", "match_phase", "gamestate", "gamephase",
+        -- Events
+        "matchevent", "match_event", "specialevent", "worldevent",
+        "vehicledrop", "vehicle_drop", "cardrop", "crate_drop",
+        "supplydrop", "airdrop", "airdroptype",
+        -- Crate/Box
+        "crate", "boxspawn", "cratebox", "lootbox",
+        "spawnbox", "specialbox", "eventcrate",
+        -- Vehicle drop
+        "vehiclecollect", "vehicledebut", "granddebut",
+        "vehiclespawnisland", "lobbyvehicle",
     }
 
     -- Search package.loaded
-    w("═══ package.loaded (all matches) ═══")
+    w("═══ package.loaded MATCHES ═══")
     local matched = {}
     for path, mod in pairs(package.loaded) do
         if type(path) == "string" and type(mod) == "table" then
             local lk = path:lower()
             for _, kw in ipairs(KEYWORDS) do
-                if lk:find(kw) then
+                if lk:find(kw, 1, true) then
                     matched[#matched+1] = path
                     break
                 end
@@ -96,7 +109,7 @@ _G.V32_Dump1_SearchModules = function()
                 if type(cfg) == "table" and type(cfg.ModuleName) == "string" then
                     local lk = cfg.ModuleName:lower()
                     for _, kw in ipairs(KEYWORDS) do
-                        if lk:find(kw) then
+                        if lk:find(kw, 1, true) then
                             w("  " .. tostring(key) .. " = " .. cfg.ModuleName)
                             break
                         end
@@ -116,7 +129,27 @@ _G.V32_Dump1_SearchModules = function()
                 if type(cfg) == "table" and type(cfg.ModuleName) == "string" then
                     local lk = cfg.ModuleName:lower()
                     for _, kw in ipairs(KEYWORDS) do
-                        if lk:find(kw) then
+                        if lk:find(kw, 1, true) then
+                            w("  " .. tostring(key) .. " = " .. cfg.ModuleName)
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    -- DataModuleConfig
+    w("")
+    w("═══ ModuleManager.DataModuleConfig ═══")
+    pcall(function()
+        local MM = _G.ModuleManager
+        if MM and MM.DataModuleConfig then
+            for key, cfg in pairs(MM.DataModuleConfig) do
+                if type(cfg) == "table" and type(cfg.ModuleName) == "string" then
+                    local lk = cfg.ModuleName:lower()
+                    for _, kw in ipairs(KEYWORDS) do
+                        if lk:find(kw, 1, true) then
                             w("  " .. tostring(key) .. " = " .. cfg.ModuleName)
                             break
                         end
@@ -127,16 +160,16 @@ _G.V32_Dump1_SearchModules = function()
     end)
 
     local txt = table.concat(out, "\n")
-    S("v32_search.txt", txt)
+    S("v33_modules.txt", txt)
     print(txt)
-    P("V32 SEARCH", "Saved: v32_search.txt")
+    P("V33 MODULES", "Saved: v33_modules.txt\n(" .. #matched .. " matches)")
     return txt
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- DUMP 2: DETAILED — every matched module ka full structure
+-- PART 2: DETAILED DUMP — every matched module
 -- ═══════════════════════════════════════════════════════════════════
-_G.V32_Dump2_Details = function()
+_G.V33_DumpDetails = function()
     local out = {}
     local function w(s) out[#out+1] = tostring(s) end
     w("═══ DETAILED MODULE DUMP ═══")
@@ -144,35 +177,40 @@ _G.V32_Dump2_Details = function()
     w("")
 
     local KEYWORDS = {
-        "vehiclemod", "modsystem", "granddebut", "debut",
-        "vehiclemodify", "carmod", "collectionreward",
-        "vehiclecollect", "tierreward",
+        "spawnisland", "island", "plane", "freefall", "parachute",
+        "matchevent", "vehicledrop", "cardrop", "crate", "airdrop",
+        "supplydrop", "vehiclecollect", "granddebut", "lobbyvehicle",
     }
 
-    local checked = 0
+    local count = 0
     for path, mod in pairs(package.loaded) do
         if type(path) == "string" and type(mod) == "table" then
             local lk = path:lower()
             local isMatch = false
             for _, kw in ipairs(KEYWORDS) do
-                if lk:find(kw) then isMatch = true break end
+                if lk:find(kw, 1, true) then isMatch = true break end
             end
 
             if isMatch then
-                checked = checked + 1
+                count = count + 1
                 w("")
                 w("══════════════════════════════════════════════")
                 w("MODULE: " .. path)
                 w("══════════════════════════════════════════════")
-                
-                -- Top-level
-                w("── TOP LEVEL ──")
+
+                -- Top level functions
+                local topFns = {}
                 for k, v in pairs(mod) do
-                    if type(k) == "string" and not k:match("^__") then
-                        w("  [" .. type(v) .. "] " .. tostring(k) .. " = " .. V(v, 0, 1))
+                    if type(v) == "function" and type(k) == "string" and not k:match("^__") then
+                        topFns[#topFns+1] = k
                     end
                 end
-                
+                table.sort(topFns, function(a,b) return tostring(a)<tostring(b) end)
+                if #topFns > 0 then
+                    w("── TOP FUNCTIONS (" .. #topFns .. ") ──")
+                    for _, fn in ipairs(topFns) do w("  " .. tostring(fn)) end
+                end
+
                 -- Inner impl
                 local i = mod.__inner_impl
                 if type(i) == "table" then
@@ -183,22 +221,22 @@ _G.V32_Dump2_Details = function()
                         if type(v) == "function" then fns[#fns+1] = k
                         elseif type(v) == "table" then
                             local n = 0; for _ in pairs(v) do n = n + 1 end
-                            tbls[#tbls+1] = k .. "(" .. n .. ")"
+                            tbls[#tbls+1] = tostring(k) .. "(" .. n .. ")"
                         end
                     end
                     table.sort(fns, function(a,b) return tostring(a)<tostring(b) end)
                     table.sort(tbls, function(a,b) return tostring(a)<tostring(b) end)
-                    
-                    w("  FUNCTIONS (" .. #fns .. "):")
-                    for _, fn in ipairs(fns) do
-                        local info = debug.getinfo(i[fn], "S")
-                        w("    fn " .. tostring(fn) .. " (" .. 
-                          (info and info.linedefined or "?") .. ")")
+                    if #fns > 0 then
+                        w("  FUNCTIONS (" .. #fns .. "):")
+                        for _, fn in ipairs(fns) do
+                            local info = debug.getinfo(i[fn], "S")
+                            w("    " .. tostring(fn) .. " (" .. 
+                              tostring(info and info.linedefined or "?") .. ")")
+                        end
                     end
-                    
-                    w("  TABLES (" .. #tbls .. "):")
-                    for _, t in ipairs(tbls) do
-                        w("    tbl " .. t)
+                    if #tbls > 0 then
+                        w("  TABLES (" .. #tbls .. "):")
+                        for _, t in ipairs(tbls) do w("    " .. t) end
                     end
                 end
             end
@@ -206,186 +244,286 @@ _G.V32_Dump2_Details = function()
     end
 
     w("")
-    w("Total modules checked: " .. checked)
+    w("Total modules: " .. count)
 
     local txt = table.concat(out, "\n")
-    S("v32_details.txt", txt)
-    print(txt)
-    P("V32 DETAILS", "Saved: v32_details.txt")
+    S("v33_details.txt", txt)
+    print("[V33] Details saved (" .. count .. " modules)")
+    P("V33 DETAILS", "Saved: v33_details.txt\n(" .. count .. " modules)")
     return txt
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- ⭐ TRACE: Capture Grand Debut click sequence
+-- PART 3: MATCH PHASE DETECTION
 -- ═══════════════════════════════════════════════════════════════════
-_G._V32_TraceLog = {}
-_G._V32_TraceActive = false
+_G.V33_GetPhase = function()
+    local phase = "unknown"
+    local raw = {}
 
-_G.V32_TraceStart = function()
-    if _G._V32_TraceActive then
-        P("V32", "Already tracing")
-        return
+    pcall(function()
+        if GameStatus then
+            for _, fn in ipairs({ "IsInLobbyOrMainCity", "IsInFightingStatus", 
+                                   "IsInMatch", "IsInGame" }) do
+                if type(GameStatus[fn]) == "function" then
+                    local ok, v = pcall(GameStatus[fn])
+                    if ok then raw[fn] = v end
+                end
+            end
+        end
+        -- GameplayState
+        if GameplayData then
+            for _, fn in ipairs({ "GetGameState", "IsInGame" }) do
+                if type(GameplayData[fn]) == "function" then
+                    local ok, v = pcall(GameplayData[fn])
+                    if ok then raw["GD."..fn] = v end
+                end
+            end
+        end
+    end)
+
+    -- Determine phase
+    pcall(function()
+        if GameStatus and GameStatus.IsInLobbyOrMainCity and GameStatus.IsInLobbyOrMainCity() then
+            phase = "lobby"
+        elseif GameStatus and GameStatus.IsInFightingStatus and GameStatus.IsInFightingStatus() then
+            phase = "match"
+        end
+    end)
+
+    -- Sub-phase if in match
+    local subPhase = "none"
+    if phase == "match" then
+        pcall(function()
+            local GD = require("GameLua.GameCore.Data.GameplayData")
+            local ch = GD.GetPlayerCharacter and GD.GetPlayerCharacter()
+            if ch and slua.isValid(ch) then
+                -- Check parasuit / plane / spawn island
+                local E = import("EParachuteState")
+                if E and ch.ParachuteState ~= nil then
+                    if ch.ParachuteState == E.PS_None then subPhase = "plane"
+                    elseif ch.ParachuteState == E.PS_Free then subPhase = "freefall"
+                    elseif ch.ParachuteState == E.PS_Open then subPhase = "parachute_open"
+                    elseif ch.ParachuteState == E.PS_Land then subPhase = "landed" end
+                end
+                -- Vehicle check
+                if ch.GetCurrentVehicle then
+                    local v = ch:GetCurrentVehicle()
+                    if v and slua.isValid(v) then subPhase = subPhase .. "+vehicle" end
+                end
+            end
+        end)
     end
-    _G._V32_TraceActive = true
-    _G._V32_TraceLog = {}
+
+    return phase, subPhase, raw
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- PART 4: RUNTIME TRACE DURING MATCH
+-- ═══════════════════════════════════════════════════════════════════
+_G._V33_TraceLog = {}
+_G._V33_TraceActive = false
+
+_G.V33_TraceStart = function()
+    if _G._V33_TraceActive then P("V33", "Already tracing") return end
+    _G._V33_TraceActive = true
+    _G._V33_TraceLog = {}
 
     local function log(s)
-        _G._V32_TraceLog[#_G._V32_TraceLog+1] = 
+        _G._V33_TraceLog[#_G._V33_TraceLog+1] = 
             string.format("[%s] %s", os.date("%H:%M:%S"), s)
     end
 
     log("=== TRACE STARTED ===")
 
-    -- Hook ThemeVehicleManager
+    -- Hook GameStatus
     pcall(function()
-        local M = require("client.logic.lobby.ThemeVehicleManager")
-        local i = M and M.__inner_impl
-        if not i then return end
-        for k, fn in pairs(i) do
-            if type(fn) == "function" and type(k) == "string" then
-                local orig = fn
-                i[k] = function(self, ...)
-                    local args = {}
-                    for n = 1, math.min(5, select("#", ...)) do
-                        local v = select(n, ...)
-                        if type(v) == "table" then args[#args+1] = "tbl"
-                        else args[#args+1] = tostring(v):sub(1, 30) end
+        if GameStatus then
+            for k, fn in pairs(GameStatus) do
+                if type(fn) == "function" and type(k) == "string" then
+                    local orig = fn
+                    GameStatus[k] = function(...)
+                        log("GameStatus." .. tostring(k))
+                        local ok, r = pcall(orig, ...)
+                        if not ok then log("  ✗ ERR")
+                        elseif r ~= nil then log("  ↳ " .. tostring(r)) end
+                        return r
                     end
-                    log("TVM." .. tostring(k) .. "(" .. table.concat(args, ",") .. ")")
-                    local ok, r = pcall(orig, self, ...)
-                    if not ok then log("  ✗ " .. tostring(r):sub(1, 150))
-                    elseif r ~= nil then log("  ↳ " .. V(r, 0, 1)) end
-                    return r
                 end
             end
         end
-        log("Hooked ThemeVehicleManager")
     end)
 
-    -- Hook Vehicle Mod modules
-    for path, mod in pairs(package.loaded) do
-        if type(path) == "string" and type(mod) == "table" then
-            local lk = path:lower()
-            if lk:find("vehiclemod") or lk:find("granddebut") 
-               or lk:find("modsystem") or lk:find("carmod") then
-                local inner = mod.__inner_impl or mod
-                if type(inner) == "table" then
-                    for k, fn in pairs(inner) do
-                        if type(fn) == "function" and type(k) == "string" then
-                            local orig = fn
-                            inner[k] = function(self, ...)
-                                local args = {}
-                                for n = 1, math.min(5, select("#", ...)) do
-                                    local v = select(n, ...)
-                                    if type(v) == "table" then args[#args+1] = "tbl"
-                                    else args[#args+1] = tostring(v):sub(1, 30) end
-                                end
-                                log(path:sub(-30) .. "." .. tostring(k) .. "(" .. 
-                                    table.concat(args, ",") .. ")")
-                                local ok, r = pcall(orig, self, ...)
-                                if not ok then log("  ✗ " .. tostring(r):sub(1, 150))
-                                elseif r ~= nil then log("  ↳ " .. V(r, 0, 1)) end
-                                return r
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- Hook MiniTVActor / LobbyVehicle related
-    for _, path in ipairs({
-        "client.lobby_ue_object.Actor.MiniTV.MiniTVActor",
-        "client.lobby_ue_object.Actor.LobbyVehicle",
-        "client.lobby_ue_object.Actor.LobbyPawn",
-    }) do
-        pcall(function()
-            local M = require(path)
-            local i = M and M.__inner_impl
-            if type(i) ~= "table" then return end
-            for k, fn in pairs(i) do
+    -- Hook GameplayData
+    pcall(function()
+        if GameplayData then
+            for k, fn in pairs(GameplayData) do
                 if type(fn) == "function" and type(k) == "string" then
                     local lk = k:lower()
-                    if lk:find("drop") or lk:find("spawn") or lk:find("crate")
-                       or lk:find("anim") or lk:find("open") or lk:find("show")
-                       or lk:find("vehicle") or lk:find("debut") then
+                    if lk:find("game") or lk:find("match") or lk:find("phase")
+                       or lk:find("state") or lk:find("spawn") or lk:find("vehicle") then
                         local orig = fn
-                        i[k] = function(self, ...)
-                            log(path:sub(-25) .. "." .. tostring(k))
-                            local ok, r = pcall(orig, self, ...)
-                            if not ok then log("  ✗ " .. tostring(r):sub(1, 100))
+                        GameplayData[k] = function(...)
+                            log("GD." .. tostring(k))
+                            local ok, r = pcall(orig, ...)
+                            if not ok then log("  ✗ ERR: " .. tostring(r):sub(1, 80))
                             end
                             return r
                         end
                     end
                 end
             end
-        end)
-    end
+        end
+    end)
 
-    log("=== HOOKS READY ===")
+    -- Hook SubsystemMgr for event/subsystem related
+    pcall(function()
+        local SubMgr = require("GameLua.GameCore.Module.Subsystem.SubsystemMgr")
+        if SubMgr and type(SubMgr.Get) == "function" then
+            local subs = {
+                "MatchEventSubsystem", "VehicleDropSubsystem", "EventSubsystem",
+                "SpawnIslandSubsystem", "GameStateSubsystem", "MatchPhaseSubsystem",
+                "VehicleCollectSubsystem", "CrateSubsystem", "AirdropSubsystem",
+                "VehicleSubsystem", "GameplaySubsystem",
+            }
+            for _, name in ipairs(subs) do
+                pcall(function()
+                    local sub = SubMgr:Get(name)
+                    if sub and type(sub) == "table" then
+                        log("Found subsystem: " .. name)
+                        for k, fn in pairs(sub) do
+                            if type(fn) == "function" and type(k) == "string" then
+                                local lk = k:lower()
+                                if lk:find("spawn") or lk:find("drop") or lk:find("create")
+                                   or lk:find("crate") or lk:find("vehicle") or lk:find("event")
+                                   or lk:find("show") or lk:find("trigger") then
+                                    local orig = fn
+                                    sub[k] = function(self, ...)
+                                        log(name .. "." .. tostring(k))
+                                        local ok, r = pcall(orig, self, ...)
+                                        if not ok then log("  ✗ ERR")
+                                        elseif r ~= nil then log("  ↳ " .. V(r, 0, 1)) end
+                                        return r
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+    end)
 
-    -- Auto-save
+    -- Auto-save every 5 sec
     pcall(function()
         local ticker = require("common.time_ticker")
         if ticker and ticker.AddTimerLoop then
             ticker.AddTimerLoop(0, function()
-                if _G._V32_TraceActive and #_G._V32_TraceLog > 0 then
-                    S("v32_trace.txt", table.concat(_G._V32_TraceLog, "\n"))
+                if _G._V33_TraceActive and #_G._V33_TraceLog > 0 then
+                    S("v33_trace.txt", table.concat(_G._V33_TraceLog, "\n"))
                 end
-            end, -1, 8.0)
+            end, -1, 5.0)
         end
     end)
 
-    P("V32 TRACE ON",
-        "Trace active.\n\n" ..
-        "NOW:\n" ..
-        "1. Vehicle Mod System kholo\n" ..
-        "2. Grand Debut tier click karo\n" ..
-        "3. Box khulne ka animation dekho\n" ..
-        "4. Wait 10 sec\n" ..
-        "5. V32_TraceStop()")
+    log("=== HOOKS READY ===")
+
+    -- Phase monitor loop
+    pcall(function()
+        local ticker = require("common.time_ticker")
+        if ticker and ticker.AddTimerLoop then
+            local lastPhase = ""
+            ticker.AddTimerLoop(0, function()
+                if not _G._V33_TraceActive then return end
+                local phase, subPhase = V33_GetPhase()
+                local cur = tostring(phase) .. "|" .. tostring(subPhase)
+                if cur ~= lastPhase then
+                    log("PHASE CHANGE: " .. cur)
+                    lastPhase = cur
+                end
+            end, -1, 1.0)
+        end
+    end)
+
+    P("V33 TRACE ON",
+        "Match trace active.\n\n" ..
+        "Ab:\n" ..
+        "1. Match start karo\n" ..
+        "2. Spawn island pe wait karo\n" ..
+        "3. Plane phase dekho\n" ..
+        "4. Crate drop hone tak wait\n" ..
+        "5. V33_TraceStop()")
 end
 
-_G.V32_TraceStop = function()
-    _G._V32_TraceActive = false
-    local txt = table.concat(_G._V32_TraceLog or {}, "\n")
-    S("v32_trace.txt", txt)
-    P("V32 TRACE STOP", 
-        "Saved: v32_trace.txt\n" ..
-        "Lines: " .. #(_G._V32_TraceLog or {}))
+_G.V33_TraceStop = function()
+    _G._V33_TraceActive = false
+    local txt = table.concat(_G._V33_TraceLog or {}, "\n")
+    S("v33_trace.txt", txt)
+    P("V33 TRACE STOP", 
+        "Saved: v33_trace.txt\n" ..
+        "Lines: " .. #(_G._V33_TraceLog or {}))
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- AUTO-RUN SEQUENCE
+-- PART 5: PHASE MONITOR (standalone, always running)
+-- ═══════════════════════════════════════════════════════════════════
+pcall(function()
+    local ticker = require("common.time_ticker")
+    if ticker and ticker.AddTimerLoop then
+        local lastPhase = ""
+        ticker.AddTimerLoop(0, function()
+            pcall(function()
+                local phase, subPhase = V33_GetPhase()
+                local cur = tostring(phase) .. "|" .. tostring(subPhase)
+                if cur ~= lastPhase then
+                    print("[V33 PHASE] " .. cur)
+                    if _G._V33_TraceActive then
+                        _G._V33_TraceLog[#_G._V33_TraceLog+1] = 
+                            string.format("[%s] PHASE: %s", os.date("%H:%M:%S"), cur)
+                    end
+                    lastPhase = cur
+                end
+            end)
+        end, -1, 1.0)
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════
+-- AUTO-RUN
 -- ═══════════════════════════════════════════════════════════════════
 pcall(function()
     local ticker = require("common.time_ticker")
     if ticker and ticker.AddTimerOnce then
         ticker.AddTimerOnce(2.0, function()
-            pcall(_G.V32_Dump1_SearchModules)
+            pcall(_G.V33_SearchModules)
         end)
         ticker.AddTimerOnce(4.0, function()
-            pcall(_G.V32_Dump2_Details)
+            pcall(_G.V33_DumpDetails)
         end)
         ticker.AddTimerOnce(6.0, function()
-            pcall(_G.V32_TraceStart)
+            pcall(_G.V33_TraceStart)
         end)
     end
 end)
 
-print("[V32] Loaded. Auto-dump + trace start in 6s.")
-P("v32 LOADED",
-    "Grand Debut Dumper\n\n" ..
+S("v33_report.txt",
+    "v33 REPORT\n" ..
+    "Time: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n\n" ..
+    "Commands:\n" ..
+    "  V33_SearchModules()  -- find match event modules\n" ..
+    "  V33_DumpDetails()    -- full structure\n" ..
+    "  V33_GetPhase()       -- current phase\n" ..
+    "  V33_TraceStart()     -- start runtime trace\n" ..
+    "  V33_TraceStop()      -- save trace\n"
+)
+
+P("v33 LOADED",
+    "Match Event Dumper\n\n" ..
     "Auto:\n" ..
     "  2s → Search modules\n" ..
-    "  4s → Detail dump\n" ..
+    "  4s → Details dump\n" ..
     "  6s → Trace start\n\n" ..
-    "Phir:\n" ..
-    "1. Mod System kholo\n" ..
-    "2. Grand Debut click karo\n" ..
-    "3. Wait 10 sec\n" ..
-    "4. V32_TraceStop()")
+    "Phir match start karo.\n" ..
+    "Wait 15-20 sec.\n" ..
+    "V33_TraceStop()")
 
 return true
