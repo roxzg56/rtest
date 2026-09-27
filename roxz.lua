@@ -1,7 +1,7 @@
 -- ═══════════════════════════════════════════════════════════════════
--- v40 — FULLY AUTONOMOUS BORNISLAND VEHICLE SPAWN
--- Koi command nahi. Load hote hi sab kuch auto chalega.
--- BornIsland phase detect → force dump → spawn fire → save files
+-- v41 — FORCE INSTANCE + ALTERNATE CLIENT PATHS
+-- Auto-fire. Koi command nahi.
+-- 3 paths: Subsystem force-init + LuckyAirDrop fake + UI mesh
 -- ═══════════════════════════════════════════════════════════════════
 
 local DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
@@ -13,6 +13,12 @@ local function S(name, content)
     return true
 end
 
+local function A(file, line)
+    local f = io.open(DIR .. file, "a")
+    if not f then return false end
+    f:write(line .. "\n"); f:close()
+end
+
 local function P(t, m)
     pcall(function()
         local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
@@ -22,12 +28,15 @@ local function P(t, m)
     end)
 end
 
-local function appendLine(file, line)
-    local f = io.open(DIR .. file, "a")
-    if not f then return false end
-    f:write(line .. "\n"); f:close()
-    return true
+local LOGF = "v41_session.txt"
+local function L(s)
+    local line = "[" .. os.date("%H:%M:%S") .. "] " .. tostring(s)
+    A(LOGF, line)
+    print("[v41] " .. line)
 end
+
+-- Fresh session file
+S(LOGF, "═══ v41 SESSION " .. os.date("%Y-%m-%d %H:%M:%S") .. " ═══\n")
 
 -- ═══════════════════════════════════════════════════════════════════
 -- CONFIG
@@ -39,24 +48,10 @@ local CFG = {
     dropHeight = 100,
     offsetX    = 5,
     offsetY    = 5,
-    autoDelay  = 8.0,       -- script load ke baad itne sec wait
-    loopEvery  = 4.0,       -- har 4 sec check phase
-    fireOnce   = true,      -- ek baar fire karega
 }
 
--- Session log
-local LOG_LINES = {}
-local function LOG(s)
-    local line = "[" .. os.date("%H:%M:%S") .. "] " .. tostring(s)
-    LOG_LINES[#LOG_LINES+1] = line
-    appendLine("v40_session.txt", line)
-end
-
-LOG("═══ v40 SESSION START ═══")
-LOG("Vehicle: " .. CFG.vehicleID .. " | Skin: " .. CFG.skinResID .. " | InsID: " .. CFG.insID)
-
 -- ═══════════════════════════════════════════════════════════════════
--- FORCE LOADER
+-- LOADERS
 -- ═══════════════════════════════════════════════════════════════════
 local function forceLoad(path)
     local M = package.loaded[path]
@@ -66,66 +61,59 @@ local function forceLoad(path)
     return nil
 end
 
+-- DataMgr — global first, then multiple paths
+local function getDataMgr()
+    local dm = _G.DataMgr
+    if dm and type(dm) == "table" then return dm end
+    for _, p in ipairs({
+        "client.logic.data.DataMgr",
+        "client.logic.data.data_mgr",
+        "client.logic.DataMgr",
+        "GameLua.GameCore.Data.DataMgr",
+    }) do
+        local m = forceLoad(p)
+        if m and type(m) == "table" then return m end
+    end
+    return nil
+end
+
 -- ═══════════════════════════════════════════════════════════════════
--- DEEP SERIALIZER
+-- SERIALIZER
 -- ═══════════════════════════════════════════════════════════════════
 local function ser(v, d, seen)
     d = d or 0; seen = seen or {}
-    if d > 4 then return "..." end
+    if d > 3 then return "..." end
     local t = type(v)
     if t == "nil" or t == "boolean" or t == "number" then return tostring(v) end
     if t == "string" then
-        if #v > 80 then return string.format("%q...", v:sub(1, 77)) end
+        if #v > 60 then return string.format("%q...", v:sub(1, 57)) end
         return string.format("%q", v)
     end
     if t == "function" then return "<fn>" end
     if t == "userdata" then return "<ud>" end
     if t == "table" then
-        if seen[v] then return "<cycle>" end
+        if seen[v] then return "<cyc>" end
         seen[v] = true
-        local p = {}; local n = 0
-        for i = 1, math.min(#v, 15) do
-            p[#p+1] = ser(v[i], d+1, seen); n = n + 1
+        local parts = {}; local n = 0
+        for i = 1, math.min(#v, 10) do
+            parts[#parts+1] = ser(v[i], d+1, seen); n = n + 1
         end
         for k, val in pairs(v) do
-            if n >= 30 then p[#p+1] = "..." break end
+            if n >= 20 then parts[#parts+1] = "..." break end
             if type(k) ~= "number" or k > #v then
-                p[#p+1] = tostring(k) .. "=" .. ser(val, d+1, seen); n = n + 1
+                parts[#parts+1] = tostring(k) .. "=" .. ser(val, d+1, seen); n = n + 1
             end
         end
-        return "{" .. table.concat(p, ", ") .. "}"
+        return "{" .. table.concat(parts, ", ") .. "}"
     end
     return "<" .. t .. ">"
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- GAME STATUS CHECK
+-- PLAYER POS
 -- ═══════════════════════════════════════════════════════════════════
-local function getPhase()
-    local info = { fighting = false, social = false, status = "unknown" }
-    local GS = _G.GameStatus or forceLoad("GameLua.GameCore.Framework.GameStatus")
-    if GS then
-        pcall(function()
-            if GS.IsInFightingStatus then
-                info.fighting = GS.IsInFightingStatus() or false
-            end
-            if GS.IsSocialIslandMode then
-                info.social = GS.IsSocialIslandMode() or false
-            end
-            if GS.GetGameStatus then
-                local s = GS.GetGameStatus()
-                info.status = tostring(s)
-            end
-        end)
-    end
-    return info
-end
-
--- ═══════════════════════════════════════════════════════════════════
--- PLAYER POSITION
--- ═══════════════════════════════════════════════════════════════════
-local function getPlayerPos()
-    local pos = { X = 0, Y = 0, Z = CFG.dropHeight }
+local function getPos()
+    local p = { X = 0, Y = 0, Z = CFG.dropHeight }
     pcall(function()
         local GD = forceLoad("GameLua.GameCore.Data.GameplayData")
         if GD and GD.GetPlayerCharacter then
@@ -134,163 +122,236 @@ local function getPlayerPos()
                 if ch.K2_GetActorLocation then
                     local loc = ch:K2_GetActorLocation()
                     if loc then
-                        pos.X = loc.X + CFG.offsetX
-                        pos.Y = loc.Y + CFG.offsetY
-                        pos.Z = loc.Z + CFG.dropHeight
+                        p.X = (loc.X or 0) + CFG.offsetX
+                        p.Y = (loc.Y or 0) + CFG.offsetY
+                        p.Z = (loc.Z or 0) + CFG.dropHeight
                     end
                 end
             end
         end
     end)
-    return pos
+    return p
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- SUBSYSTEM FINDER
+-- PATH 1 — FORCE SUBSYSTEM INSTANTIATION
 -- ═══════════════════════════════════════════════════════════════════
-local function findInstance(names)
-    local inst = nil
-    pcall(function()
-        local SM = forceLoad("GameLua.GameCore.Module.Subsystem.SubsystemMgr")
-        if SM then
-            if type(SM.Get) == "function" then
-                for _, n in ipairs(names) do
-                    local r = SM.Get(n)
-                    if r then inst = r; return end
-                end
-            end
-            if type(SM.GetSubsystem) == "function" then
-                for _, n in ipairs(names) do
-                    local r = SM.GetSubsystem(n)
-                    if r then inst = r; return end
+local function pathForceSubsystem(log)
+    log("═══ PATH 1: Force Subsystem ═══")
+
+    local SM = forceLoad("GameLua.GameCore.Module.Subsystem.SubsystemMgr")
+    if not SM then log("  ✗ SubsystemMgr not loaded"); return nil end
+
+    -- Dump current state
+    log("  SubsystemOrderNames count: " ..
+        (SM.SubsystemOrderNames and #SM.SubsystemOrderNames or 0))
+    log("  SubsystemMap count: " ..
+        (function() local c=0; if SM.SubsystemMap then for _ in pairs(SM.SubsystemMap) do c=c+1 end end; return c end)())
+
+    -- Dump subsystem names (search for BornIsland related)
+    if SM.SubsystemOrderNames then
+        local found = {}
+        for _, n in ipairs(SM.SubsystemOrderNames) do
+            if type(n) == "string" then
+                local ln = n:lower()
+                if ln:find("born") or ln:find("airdrop") or ln:find("teams") or ln:find("vehicle") then
+                    found[#found+1] = n
                 end
             end
         end
-        local SSM = forceLoad("GameLua.GameCore.Framework.SubsystemMgr")
-        if SSM and type(SSM.Get) == "function" then
-            for _, n in ipairs(names) do
-                local r = SSM.Get(n)
-                if r then inst = r; return end
-            end
-        end
-    end)
-    return inst
+        log("  BornIsland-related subsys names: " .. table.concat(found, ", "):sub(1, 300))
+    end
+
+    -- Try DynamicAddSubsystem
+    local targetName = "BornIslandTeamShowSubSystem"
+    if type(SM.DynamicAddSubsystem) == "function" then
+        local ok, err = pcall(SM.DynamicAddSubsystem, targetName)
+        log("  DynamicAddSubsystem(" .. targetName .. ") = " ..
+            (ok and "OK" or ("ERR: " .. tostring(err):sub(1,120))))
+    end
+
+    -- Try Get after add
+    if type(SM.Get) == "function" then
+        local r
+        local ok = pcall(function() r = SM.Get(targetName) end)
+        log("  Get(" .. targetName .. ") after add = " ..
+            (ok and (r and "GOT INSTANCE" or "nil") or "ERR"))
+        if r then return r end
+    end
+
+    -- Try _Register
+    if type(SM._Register) == "function" then
+        pcall(SM._Register, targetName)
+        log("  _Register called")
+    end
+
+    -- Try Init to force all
+    if type(SM.Init) == "function" then
+        pcall(SM.Init)
+        log("  Init() called")
+    end
+
+    -- Retry Get
+    if type(SM.Get) == "function" then
+        local r
+        pcall(function() r = SM.Get(targetName) end)
+        if r then log("  ✓ INSTANCE after Init"); return r end
+    end
+
+    log("  ✗ no instance obtained")
+    return nil
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- AUTO DUMP — jab bhi phase BornIsland ho, structure dump kare
+-- PATH 2 — LUCKY AIRDROP (FakeLuckAirData + UI push)
 -- ═══════════════════════════════════════════════════════════════════
-local DUMP_DONE = false
-local function autoDump()
-    if DUMP_DONE then return end
-    DUMP_DONE = true
+local function pathLuckyAirDrop(log)
+    log("═══ PATH 2: LuckyAirDrop Client Path ═══")
 
-    LOG("── AUTO DUMP START ──")
-    local out = {}
-    out[#out+1] = "═══ v40 AUTO DUMP ═══"
-    out[#out+1] = "Time: " .. os.date("%Y-%m-%d %H:%M:%S")
+    local M = forceLoad("client.slua.logic.luck_airdrop.logic_luck_air_drop")
+    if not M then log("  ✗ not loaded"); return end
 
-    local phase = getPhase()
-    out[#out+1] = string.format("Phase: fighting=%s social=%s status=%s",
-        tostring(phase.fighting), tostring(phase.social), tostring(phase.status))
-    out[#out+1] = ""
-
-    local paths = {
-        "GameLua.Mod.BaseMod.Client.BornIslandTeamShow.BornIslandTeamShowSubSystem",
-        "client.lobby_ue_object.Actor.LobbyVehicle",
-        "client.lobby_ue_object.Actor.LobbyPawn",
-        "client.logic.lobby.ThemeVehicleManager",
-        "client.logic.vehicle.VehicleCollectSystem",
-        "GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem",
-        "client.logic.data.DataMgr",
-        "GameLua.GameCore.Module.Subsystem.SubsystemMgr",
-        "GameLua.GameCore.Module.Vehicle.ALuaVehicleBase",
-        "client.network.Protocol.LuckAirDropHandler",
-        "client.slua.logic.luck_airdrop.logic_luck_air_drop",
-        "client.slua.umg.LuckyAirDrop.ui_airdrop_mesh",
-        "GameLua.Mod.BaseMod.Client.Tips.BirthIslandTips",
+    -- Build fake data matching expected shape
+    local pos = getPos()
+    local fakeData = {
+        itemID = CFG.skinResID,
+        ItemID = CFG.skinResID,
+        skinResID = CFG.skinResID,
+        vehicleID = CFG.vehicleID,
+        insID = CFG.insID,
+        posX = pos.X, posY = pos.Y, posZ = pos.Z,
+        X = pos.X, Y = pos.Y, Z = pos.Z,
+        quality = 5,
+        Quality = 5,
     }
 
-    for _, path in ipairs(paths) do
-        out[#out+1] = "── " .. path .. " ──"
-        local M = forceLoad(path)
-        if M then
-            out[#out+1] = "  STATUS: LOADED"
-            local impl = M.__inner_impl or M
-            local funcs, tables = {}, {}
-            for k, v in pairs(impl) do
-                if type(v) == "function" then funcs[#funcs+1] = k
-                elseif type(v) == "table" then tables[#tables+1] = k end
-            end
-            out[#out+1] = "  FUNCTIONS (" .. #funcs .. "):"
-            for i = 1, math.min(#funcs, 100) do
-                out[#out+1] = "    " .. funcs[i]
-            end
-            if #tables > 0 then
-                out[#out+1] = "  TABLES: " .. table.concat(tables, ", ")
-            end
-        else
-            out[#out+1] = "  STATUS: NOT LOADED"
+    -- Dump current cached data for reference
+    pcall(function()
+        if M.LuckAirData then
+            log("  LuckAirData = " .. ser(M.LuckAirData, 0, {}))
         end
-        out[#out+1] = ""
+        if M.target_airdrop_data then
+            log("  target_airdrop_data = " .. ser(M.target_airdrop_data, 0, {}))
+        end
+    end)
+
+    -- Try FakeLuckAirData
+    if type(M.FakeLuckAirData) == "function" then
+        local ok, err = pcall(M.FakeLuckAirData)
+        log("  FakeLuckAirData() = " .. (ok and "OK" or ("ERR: " .. tostring(err):sub(1,100))))
+
+        pcall(function()
+            M.FakeLuckAirData(fakeData)
+            log("  FakeLuckAirData(fakeData) OK")
+        end)
     end
 
-    -- SubsystemMgr all
-    out[#out+1] = "── SubsystemMgr instance scan ──"
-    local SM = forceLoad("GameLua.GameCore.Module.Subsystem.SubsystemMgr")
-    if SM then
-        for k, v in pairs(SM) do
-            if type(v) == "function" then out[#out+1] = "  fn " .. k end
-        end
-        for k, v in pairs(SM) do
-            if type(v) == "table" then
-                out[#out+1] = "  table " .. tostring(k) .. " keys=" .. tostring(#v)
-            end
-        end
+    -- Try SetEquipedInfo
+    if type(M.SetEquipedInfo) == "function" then
+        pcall(function()
+            M.SetEquipedInfo(fakeData)
+            log("  SetEquipedInfo OK")
+        end)
     end
 
-    -- DataMgr snapshot
-    out[#out+1] = ""
-    out[#out+1] = "── DataMgr.VehicleSlotList[902] ──"
-    local DM = forceLoad("client.logic.data.DataMgr")
-    if DM then
-        if DM.VehicleSlotList then
-            for k, v in pairs(DM.VehicleSlotList) do
-                out[#out+1] = "  [" .. tostring(k) .. "] = " .. ser(v, 0, {})
-            end
-        end
-        if DM.vehicleSkinInsIDTable then
-            out[#out+1] = "── vehicleSkinInsIDTable[902] ──"
-            out[#out+1] = "  " .. ser(DM.vehicleSkinInsIDTable[902], 0, {})
-        end
-        if DM.defaultVehicleSkinResIDTable then
-            out[#out+1] = "── defaultVehicleSkinResIDTable[902] ──"
-            out[#out+1] = "  " .. ser(DM.defaultVehicleSkinResIDTable[902], 0, {})
-        end
+    -- Try HandleTargetAirdropData
+    if type(M.HandleTargetAirdropData) == "function" then
+        pcall(function()
+            M.HandleTargetAirdropData(fakeData)
+            log("  HandleTargetAirdropData OK")
+        end)
     end
 
-    S("v40_dump.txt", table.concat(out, "\n"))
-    LOG("AUTO DUMP saved: v40_dump.txt lines=" .. #out)
+    -- Try RefreshLuckAirDropLoacation
+    if type(M.RefreshLuckAirDropLoacation) == "function" then
+        pcall(function()
+            M.RefreshLuckAirDropLoacation()
+            log("  RefreshLuckAirDropLoacation OK")
+        end)
+    end
+
+    -- Try DataPushShowUI
+    if type(M.DataPushShowUI) == "function" then
+        pcall(function()
+            M.DataPushShowUI()
+            log("  DataPushShowUI OK")
+        end)
+    end
+
+    -- Try ShowLuckShopUI (opens the shop UI which shows airdrops)
+    if type(M.ShowLuckShopUI) == "function" then
+        pcall(function()
+            M.ShowLuckShopUI()
+            log("  ShowLuckShopUI OK")
+        end)
+    end
+
+    -- Query asset paths (yeh batayega konsa mesh hai)
+    for _, fn in ipairs({"GetBoxMeshPath", "GetMeshAssetPath", "GetAirDropClassPath", "GetLightName", "GetUISmokeName"}) do
+        if type(M[fn]) == "function" then
+            local ok, r = pcall(M[fn])
+            if ok then log("  " .. fn .. "() = " .. tostring(r)) end
+        end
+    end
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- SPAWN PATHS
+-- PATH 3 — UI AIRDROP MESH (create visual box)
 -- ═══════════════════════════════════════════════════════════════════
-local function tryPathTeamShow()
-    local rlog = {}
-    local function R(s) rlog[#rlog+1] = s; LOG("  [TeamShow] " .. s) end
+local function pathUIMesh(log)
+    log("═══ PATH 3: UI AirDrop Mesh ═══")
 
-    local M = forceLoad("GameLua.Mod.BaseMod.Client.BornIslandTeamShow.BornIslandTeamShowSubSystem")
-    if not M then R("module NOT loaded"); return rlog end
-    R("module loaded")
+    local M = forceLoad("client.slua.umg.LuckyAirDrop.ui_airdrop_mesh")
+    if not M then log("  ✗ not loaded"); return end
 
-    local impl = M.__inner_impl or M
-    local inst = findInstance({"BornIslandTeamShowSubSystem", "BornIslandTeamShow"})
-    if inst then R("live instance found")
-    else inst = impl; R("using impl as instance") end
+    local pos = getPos()
+    local fakeTransform = {
+        Location = { X = pos.X, Y = pos.Y, Z = pos.Z },
+        Rotation = { Roll = 0, Pitch = 0, Yaw = 0 },
+        Scale = { X = 1, Y = 1, Z = 1 },
+        X = pos.X, Y = pos.Y, Z = pos.Z,
+    }
 
-    local pos = getPlayerPos()
-    local fakeData = {
+    local tries = {
+        { "Create", {} },
+        { "CreateBox", { fakeTransform, CFG.skinResID } },
+        { "CreateBox", { CFG.skinResID } },
+        { "CreateBox", {} },
+        { "ChangeSkin", { CFG.skinResID } },
+        { "UpdateBoxMesh", { CFG.skinResID } },
+        { "ShowBox", {} },
+        { "ShowOrHide", { true } },
+        { "DownloadResourceAndCreateBox", { CFG.skinResID } },
+    }
+
+    for _, t in ipairs(tries) do
+        if type(M[t[1]]) == "function" then
+            local ok, err = pcall(M[t[1]], table.unpack(t[2]))
+            log("  " .. t[1] .. "(" .. #t[2] .. " args) = " ..
+                (ok and "OK" or ("ERR: " .. tostring(err):sub(1,100))))
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- PATH 4 — TeamShow with FOUND instance (via path 1)
+-- ═══════════════════════════════════════════════════════════════════
+local function pathTeamShowWithInstance(inst, log)
+    log("═══ PATH 4: TeamShow w/ instance ═══")
+
+    if not inst then
+        -- fallback to impl
+        local M = forceLoad("GameLua.Mod.BaseMod.Client.BornIslandTeamShow.BornIslandTeamShowSubSystem")
+        inst = M and (M.__inner_impl or M)
+        log("  no live instance — using impl (may not work)")
+    else
+        log("  using REAL live instance")
+    end
+
+    if not inst then log("  ✗ no inst at all"); return end
+
+    local pos = getPos()
+    local fake = {
         vehicleID = CFG.vehicleID, VehicleID = CFG.vehicleID,
         skinResID = CFG.skinResID, SkinResID = CFG.skinResID,
         insID = CFG.insID, InsID = CFG.insID,
@@ -300,49 +361,64 @@ local function tryPathTeamShow()
         SlotID = 1, PlayerID = 0, bIsSelf = true,
     }
 
+    -- InitConfig first
     pcall(function()
         if type(inst.InitConfig) == "function" then
-            inst:InitConfig(); R("InitConfig OK")
+            inst:InitConfig(); log("  InitConfig OK")
         end
     end)
 
-    if type(inst.CreateDataForShow) == "function" then
-        local ok, err = pcall(inst.CreateDataForShow, inst, fakeData)
-        R("CreateDataForShow = " .. (ok and "OK" or ("ERR: " .. tostring(err):sub(1,100))))
-    end
+    -- CreateDataForShow
+    pcall(function()
+        if type(inst.CreateDataForShow) == "function" then
+            local ok, err = pcall(inst.CreateDataForShow, inst, fake)
+            log("  CreateDataForShow = " .. (ok and "OK" or tostring(err):sub(1,100)))
+        end
+    end)
 
-    if type(inst.CreateCarObject) == "function" then
-        local ok, err = pcall(inst.CreateCarObject, inst, fakeData)
-        R("CreateCarObject = " .. (ok and "OK" or ("ERR: " .. tostring(err):sub(1,150))))
-    end
+    -- CreateCarObject — CAR SPAWN
+    pcall(function()
+        if type(inst.CreateCarObject) == "function" then
+            local ok, err = pcall(inst.CreateCarObject, inst, fake)
+            log("  CreateCarObject = " .. (ok and "OK" or tostring(err):sub(1,150)))
+        end
+    end)
 
-    if type(inst.BeginShow) == "function" then
-        local ok, err = pcall(inst.BeginShow, inst)
-        R("BeginShow = " .. (ok and "OK" or ("ERR: " .. tostring(err):sub(1,100))))
-    end
-    if type(inst.ReadyToShow) == "function" then
-        local ok = pcall(inst.ReadyToShow, inst)
-        R("ReadyToShow = " .. (ok and "OK" or "ERR"))
-    end
-    return rlog
+    -- CreateSingleRole (ye bhi actor spawn karta hai)
+    pcall(function()
+        if type(inst.CreateSingleRole) == "function" then
+            local ok = pcall(inst.CreateSingleRole, inst, {})
+            log("  CreateSingleRole = " .. (ok and "OK" or "ERR"))
+        end
+    end)
+
+    -- Try BeginShow with config tbl (line 1078 needed arg)
+    pcall(function()
+        if type(inst.BeginShow) == "function" then
+            local cfgTable = inst:GetCurrentConfig and inst:GetCurrentConfig() or {}
+            local ok, err = pcall(inst.BeginShow, inst, cfgTable)
+            log("  BeginShow(cfg) = " .. (ok and "OK" or tostring(err):sub(1,150)))
+        end
+    end)
+
+    -- ReadyToShow with args
+    pcall(function()
+        if type(inst.ReadyToShow) == "function" then
+            local ok, err = pcall(inst.ReadyToShow, inst, true)
+            log("  ReadyToShow(true) = " .. (ok and "OK" or tostring(err):sub(1,100)))
+        end
+    end)
 end
 
-local function tryPathThemeVehicle()
-    local rlog = {}
-    local function R(s) rlog[#rlog+1] = s; LOG("  [ThemeVM] " .. s) end
+-- ═══════════════════════════════════════════════════════════════════
+-- PATH 5 — DataMgr + ThemeVM (sahi DataMgr)
+-- ═══════════════════════════════════════════════════════════════════
+local function pathThemeVM(log)
+    log("═══ PATH 5: ThemeVM + real DataMgr ═══")
 
-    local M = forceLoad("client.logic.lobby.ThemeVehicleManager")
-    if not M then R("not loaded"); return rlog end
-    R("loaded")
-
-    M.RepeatTags = M.RepeatTags or {}
-    M.Vehicles = M.Vehicles or {}
-    M.SkinCache = M.SkinCache or {}
-    M.ModelActorCache = M.ModelActorCache or {}
-    R("tables initialized")
-
-    local DM = forceLoad("client.logic.data.DataMgr")
+    local DM = getDataMgr()
     if DM then
+        log("  ✓ DataMgr found")
         DM.VehicleSlotList = DM.VehicleSlotList or {}
         DM.VehicleSlotList[CFG.vehicleID] = { [1] = CFG.insID }
         DM.vehicleSkinInsIDTable = DM.vehicleSkinInsIDTable or {}
@@ -350,8 +426,19 @@ local function tryPathThemeVehicle()
         DM.defaultVehicleSkinResIDTable = DM.defaultVehicleSkinResIDTable or {}
         DM.defaultVehicleSkinResIDTable[CFG.vehicleID] = CFG.skinResID
         if DM.roleData then DM.roleData.vst_skin = CFG.insID end
-        R("DataMgr injected")
+        log("  DataMgr injected")
+    else
+        log("  ✗ DataMgr not found in any path")
     end
+
+    local M = forceLoad("client.logic.lobby.ThemeVehicleManager")
+    if not M then log("  ✗ ThemeVM not loaded"); return end
+    log("  ThemeVM loaded")
+
+    M.RepeatTags = M.RepeatTags or {}
+    M.Vehicles = M.Vehicles or {}
+    M.SkinCache = M.SkinCache or {}
+    M.ModelActorCache = M.ModelActorCache or {}
 
     local tries = {
         { "ShowThemeVehicle", { CFG.vehicleID } },
@@ -363,180 +450,137 @@ local function tryPathThemeVehicle()
     for _, t in ipairs(tries) do
         if type(M[t[1]]) == "function" then
             local ok, err = pcall(M[t[1]], M, table.unpack(t[2]))
-            R(t[1] .. " = " .. (ok and "OK" or ("ERR: " .. tostring(err):sub(1,80))))
+            log("  " .. t[1] .. " = " .. (ok and "OK" or tostring(err):sub(1,100)))
         end
     end
-    return rlog
-end
-
-local function tryPathLobbyVehicle()
-    local rlog = {}
-    local function R(s) rlog[#rlog+1] = s; LOG("  [LobbyVeh] " .. s) end
-
-    local M = forceLoad("client.lobby_ue_object.Actor.LobbyVehicle")
-    if not M then R("not loaded"); return rlog end
-    R("loaded")
-
-    local impl = M.__inner_impl or M
-    local pos = getPlayerPos()
-    R(string.format("pos (%.1f,%.1f,%.1f)", pos.X, pos.Y, pos.Z))
-
-    -- Try slua spawn
-    local spawned = false
-    pcall(function()
-        if slua and slua.NewObject and impl.StaticClass then
-            local obj = slua.NewObject(impl.StaticClass)
-            if obj then
-                spawned = true
-                R("slua.NewObject(StaticClass) succeeded")
-            end
-        end
-    end)
-    if not spawned then R("slua spawn not possible — class path unknown") end
-    return rlog
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- FIRE — sab paths try kare
+-- VERIFY — after fire, scan world for new actors
+-- ═══════════════════════════════════════════════════════════════════
+local function verify(log)
+    log("═══ VERIFY ═══")
+    pcall(function()
+        if _G.GetWorld then
+            local w = _G.GetWorld()
+            log("  GetWorld() = " .. tostring(w))
+        end
+        if _G.UE and UE.GameplayStatics then
+            log("  UE.GameplayStatics available")
+            if UE.GameplayStatics.GetAllActorsOfClass then
+                log("  GetAllActorsOfClass available")
+            end
+        end
+        -- Count vehicles in world via ALuaVehicleBase
+        local vb = forceLoad("GameLua.GameCore.Module.Vehicle.ALuaVehicleBase")
+        if vb and vb.GetAllVehicles then
+            local ok, list = pcall(vb.GetAllVehicles)
+            if ok and type(list) == "table" then
+                log("  vehicles in world: " .. #list)
+            end
+        end
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- FIRE ALL PATHS
 -- ═══════════════════════════════════════════════════════════════════
 local FIRED = false
 local function fireAll()
-    if FIRED and CFG.fireOnce then
-        LOG("Already fired, skipping")
-        return
-    end
+    if FIRED then return end
     FIRED = true
+    L("═══ FIRE ALL PATHS ═══")
 
-    LOG("═══ FIRE START ═══")
-    local out = {}
-    out[#out+1] = "═══ v40 FIRE ═══"
-    out[#out+1] = "Time: " .. os.date("%Y-%m-%d %H:%M:%S")
+    local inst = nil
 
-    local phase = getPhase()
-    out[#out+1] = string.format("Phase: fighting=%s social=%s status=%s",
-        tostring(phase.fighting), tostring(phase.social), tostring(phase.status))
-    out[#out+1] = ""
+    -- 1. Force subsystem
+    pcall(function() inst = pathForceSubsystem(L) end)
+    A(LOGF, "")
 
-    out[#out+1] = "── Path 1: TeamShow ──"
-    for _, l in ipairs(tryPathTeamShow()) do out[#out+1] = l end
-    out[#out+1] = ""
+    -- 2. Lucky AirDrop
+    pcall(pathLuckyAirDrop, L)
+    A(LOGF, "")
 
-    out[#out+1] = "── Path 2: ThemeVehicleManager ──"
-    for _, l in ipairs(tryPathThemeVehicle()) do out[#out+1] = l end
-    out[#out+1] = ""
+    -- 3. UI Mesh
+    pcall(pathUIMesh, L)
+    A(LOGF, "")
 
-    out[#out+1] = "── Path 3: LobbyVehicle ──"
-    for _, l in ipairs(tryPathLobbyVehicle()) do out[#out+1] = l end
+    -- 4. TeamShow with inst
+    pcall(pathTeamShowWithInstance, inst, L)
+    A(LOGF, "")
 
-    S("v40_fire.txt", table.concat(out, "\n"))
-    LOG("FIRE END saved: v40_fire.txt")
-end
+    -- 5. ThemeVM
+    pcall(pathThemeVM, L)
+    A(LOGF, "")
 
--- ═══════════════════════════════════════════════════════════════════
--- PHASE WATCHER — har loop pe check
--- ═══════════════════════════════════════════════════════════════════
-local tickCount = 0
-local function tick()
-    tickCount = tickCount + 1
-    local phase = getPhase()
+    -- 6. Verify
+    pcall(verify, L)
 
-    if tickCount % 5 == 0 then
-        LOG(string.format("tick %d phase status=%s fighting=%s social=%s",
-            tickCount, tostring(phase.status), tostring(phase.fighting), tostring(phase.social)))
-    end
+    L("═══ FIRE END ═══")
+    A(LOGF, "── check v41_session.txt ──")
 
-    -- Auto dump jab match me ho
-    if not DUMP_DONE and (phase.fighting or phase.status == "Fighting") then
-        pcall(autoDump)
-    end
-
-    -- Fire once after dump
-    if DUMP_DONE and not FIRED then
-        pcall(fireAll)
-        -- Popup result
-        pcall(function()
-            local fireTxt = "Spawn attempt fired.\nCheck v40_fire.txt"
-            P("v40 RESULT", fireTxt)
-        end)
-    end
-
-    -- Re-try fire every 8 ticks if not fired
-    if not FIRED and tickCount > 15 then
-        LOG("Force fire after timeout")
-        pcall(fireAll)
-    end
-end
-
--- ═══════════════════════════════════════════════════════════════════
--- TIMER SETUP
--- ═══════════════════════════════════════════════════════════════════
-local timerStarted = false
-local function startTimer()
-    if timerStarted then return end
-    timerStarted = true
     pcall(function()
-        local ticker = require("common.time_ticker")
-        if ticker and ticker.AddTimerLoop then
-            ticker.AddTimerLoop(0, tick, -1, CFG.loopEvery)
-            LOG("Timer started, loop every " .. CFG.loopEvery .. "s")
-        else
-            LOG("time_ticker not available — trying fallback")
-            -- Fallback: use _G.SetTimer if available
-            if _G.SetTimer then
-                _G.SetTimer(CFG.loopEvery, tick, -1)
-                LOG("Using _G.SetTimer fallback")
-            end
-        end
+        P("v41 FIRED", "All paths fired. Check v41_session.txt")
     end)
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- BOOT — delayed start
+-- PHASE WATCHER
 -- ═══════════════════════════════════════════════════════════════════
-S("v40_report.txt",
-    "v40 AUTONOMOUS REPORT\n" ..
+local function phaseOK()
+    local GS = _G.GameStatus or forceLoad("GameLua.GameCore.Framework.GameStatus")
+    if not GS then return true end  -- fire anyway
+    local f, s = false, false
+    pcall(function()
+        if GS.IsInFightingStatus then f = GS.IsInFightingStatus() or false end
+        if GS.IsSocialIslandMode then s = GS.IsSocialIslandMode() or false end
+    end)
+    return f or s
+end
+
+local ticks = 0
+local function tick()
+    ticks = ticks + 1
+    if ticks % 3 == 0 then
+        L("tick " .. ticks .. " waiting...")
+    end
+    if phaseOK() then
+        L("Phase OK — firing")
+        fireAll()
+    end
+    if ticks > 20 and not FIRED then
+        L("Timeout — firing anyway")
+        fireAll()
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- BOOT
+-- ═══════════════════════════════════════════════════════════════════
+S("v41_report.txt",
+    "v41 REPORT\n" ..
     "Time: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n" ..
     "Vehicle: " .. CFG.vehicleID .. " | Skin: " .. CFG.skinResID .. "\n\n" ..
     "AUTO-LOADED. No commands needed.\n" ..
-    "Files written automatically:\n" ..
-    "  v40_session.txt  (live log)\n" ..
-    "  v40_dump.txt     (module structure)\n" ..
-    "  v40_fire.txt     (spawn attempts)\n")
+    "Auto-fires when BornIsland/Fighting detected.\n")
 
-LOG("Config saved. Waiting " .. CFG.autoDelay .. "s before timer start.")
-
--- Delayed timer start
 pcall(function()
     local ticker = require("common.time_ticker")
-    if ticker and ticker.AddTimerOnce then
-        ticker.AddTimerOnce(CFG.autoDelay, function()
-            LOG("Delay over, starting timer")
-            startTimer()
-        end)
-    else
-        -- Immediate start fallback
-        startTimer()
+    if ticker and ticker.AddTimerLoop then
+        ticker.AddTimerLoop(0, tick, -1, 3.0)
+        L("Timer started (every 3s)")
     end
 end)
 
--- Immediate first probe (before timer)
-pcall(function()
-    local phase = getPhase()
-    LOG("Initial phase: fighting=" .. tostring(phase.fighting) ..
-        " social=" .. tostring(phase.social) ..
-        " status=" .. tostring(phase.status))
-end)
+L("v41 loaded, waiting for phase...")
 
-P("v40 AUTO-LOADED",
-    "Autonomous spawn engine running.\n\n" ..
-    "Kuch nahi karna.\n\n" ..
-    "BornIsland match kholo.\n" ..
-    "Files khud banengi:\n" ..
-    "  v40_dump.txt\n" ..
-    "  v40_fire.txt\n" ..
-    "  v40_session.txt\n\n" ..
-    "12-15 sec me match me aao.")
+P("v41 LOADED",
+    "Auto-fire engine v41.\n\n" ..
+    "Kuch nahi karna.\n" ..
+    "Fighting/BornIsland phase milte hi:\n" ..
+    "  → 5 spawn paths fire\n" ..
+    "  → v41_session.txt me sab\n\n" ..
+    "Match me ho toh auto-fire ho jayega.")
 
-print("[v40] Auto-loaded. Timer will start in " .. CFG.autoDelay .. "s.")
-
+print("[v41] Auto-loaded. Fires when phase OK.")
 return true
