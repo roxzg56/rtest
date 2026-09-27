@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════════════════════════
--- v34 — BORN ISLAND FAKE DROP (Phase Detection Fixed)
--- Target: Spawn Island / Plane phase vehicle drop
+-- v35 — FAKE DROP TRIGGER (Born Island)
+-- Target: BornIslandAirDropSystem.CreateAirDrop
 -- Path: /storage/emulated/0/Android/data/com.pubg.imobile/files/
 -- ═══════════════════════════════════════════════════════════════════
 
@@ -25,228 +25,236 @@ local function P(t, m)
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- PHASE DETECTOR — Corrected for Spawn Island
+-- CONFIG
 -- ═══════════════════════════════════════════════════════════════════
-_G.V34_GetPhase = function()
-    local phase = "unknown"
-    local subPhase = "none"
+local CFG = {
+    vehicleID = 902,           -- Coupe RB
+    skinResID = 1961014,       -- McLaren 570S Royal Black
+    insID = 7247538342442672640,
+    dropX = 0, dropY = 0, dropZ = 100,   -- drop location (0,0 = player pos)
+    dropDelay = 3.0,           -- seconds after trigger
+    autoTrigger = false,       -- auto fire on born island entry
+}
 
-    -- 1. Basic status
+S("v35_config.txt",
+    "v35 Fake Drop Config\n" ..
+    "vehicleID = " .. CFG.vehicleID .. "\n" ..
+    "skinResID = " .. CFG.skinResID .. "\n" ..
+    "insID = " .. CFG.insID .. "\n" ..
+    "dropX/Y/Z = " .. CFG.dropX .. "/" .. CFG.dropY .. "/" .. CFG.dropZ .. "\n"
+)
+
+-- ═══════════════════════════════════════════════════════════════════
+-- BUILD DROP DATA (what CreateAirDrop expects)
+-- ═══════════════════════════════════════════════════════════════════
+local function buildDropData()
+    -- Get player position for drop
+    local px, py, pz = 0, 0, CFG.dropZ
     pcall(function()
-        if GameStatus then
-            if GameStatus.IsInLobbyOrMainCity and GameStatus.IsInLobbyOrMainCity() then
-                phase = "lobby"
-            elseif GameStatus.IsInFightingStatus and GameStatus.IsInFightingStatus() then
-                phase = "match"
-            end
+        local GD = require("GameLua.GameCore.Data.GameplayData")
+        local ch = GD.GetPlayerCharacter and GD.GetPlayerCharacter()
+        if ch and slua.isValid(ch) and ch.K2_GetActorLocation then
+            local loc = ch:K2_GetActorLocation()
+            if loc then px, py, pz = loc.X, loc.Y, loc.Z + CFG.dropZ end
         end
     end)
 
-    -- 2. Sub-phase for match
-    if phase == "match" then
-        pcall(function()
-            local GD = require("GameLua.GameCore.Data.GameplayData")
-            local ch = GD.GetPlayerCharacter and GD.GetPlayerCharacter()
-            if ch and slua.isValid(ch) then
-                -- Check Born Island first
-                local mapName = ""
-                if ch.GetMapName then mapName = ch:GetMapName() or "" end
-                if mapName:lower():find("born") or mapName:lower():find("island") then
-                    subPhase = "born_island"
-                    return
-                end
-
-                -- Check Parasuit / Plane
-                local E = import("EParachuteState")
-                if E and ch.ParachuteState ~= nil then
-                    if ch.ParachuteState == E.PS_None then subPhase = "plane"
-                    elseif ch.ParachuteState == E.PS_Free then subPhase = "freefall"
-                    elseif ch.ParachuteState == E.PS_Open then subPhase = "parachute_open"
-                    elseif ch.ParachuteState == E.PS_Land then subPhase = "landed" end
-                end
-
-                -- Check Vehicle
-                if ch.GetCurrentVehicle then
-                    local v = ch:GetCurrentVehicle()
-                    if v and slua.isValid(v) then subPhase = subPhase .. "+vehicle" end
-                end
-            end
-        end)
-    end
-
-    return phase, subPhase
+    return {
+        -- Common drop data fields (both naming conventions)
+        itemID = CFG.skinResID,
+        ItemID = CFG.skinResID,
+        skinID = CFG.skinResID,
+        SkinID = CFG.skinResID,
+        vehicleID = CFG.vehicleID,
+        VehicleID = CFG.vehicleID,
+        insID = CFG.insID,
+        InsID = CFG.insID,
+        posX = CFG.dropX ~= 0 and CFG.dropX or px,
+        posY = CFG.dropY ~= 0 and CFG.dropY or py,
+        posZ = CFG.dropZ,
+        x = CFG.dropX ~= 0 and CFG.dropX or px,
+        y = CFG.dropY ~= 0 and CFG.dropY or py,
+        z = CFG.dropZ,
+        -- Meta
+        dropType = 1,
+        DropType = 1,
+        source = "special",
+        Source = "special",
+        isVehicle = true,
+        IsVehicle = true,
+        isSpecial = true,
+        IsSpecial = true,
+    }
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- DUMP 1: Search Born Island modules
+-- TRIGGER: Call CreateAirDrop directly
 -- ═══════════════════════════════════════════════════════════════════
-_G.V34_SearchBornIsland = function()
-    local out = {}
-    local function w(s) out[#out+1] = tostring(s) end
-    w("═══ BORN ISLAND MODULE SEARCH ═══")
+_G.V35_TriggerDrop = function()
+    local results = {}
 
-    local KEYWORDS = { "bornisland", "born_island", "island", "airdrop", "spawnisland", "specialevent", "dropvehicle", "vehicledrop" }
-
-    for path, mod in pairs(package.loaded) do
-        if type(path) == "string" and type(mod) == "table" then
-            local lk = path:lower()
-            for _, kw in ipairs(KEYWORDS) do
-                if lk:find(kw, 1, true) then
-                    w("  FOUND: " .. path)
-                    local inner = mod.__inner_impl
-                    if type(inner) == "table" then
-                        local fns, tbls = {}, {}
-                        for k, v in pairs(inner) do
-                            if type(v) == "function" then fns[#fns+1] = k
-                            elseif type(v) == "table" then
-                                local n = 0; for _ in pairs(v) do n = n + 1 end
-                                tbls[#tbls+1] = k .. "(" .. n .. ")"
-                            end
-                        end
-                        table.sort(fns)
-                        table.sort(tbls)
-                        if #fns > 0 then w("    FUNCTIONS: " .. table.concat(fns, ", ")) end
-                        if #tbls > 0 then w("    TABLES: " .. table.concat(tbls, ", ")) end
-                    end
-                    break
-                end
-            end
-        end
-    end
-    local txt = table.concat(out, "\n")
-    S("v34_born_search.txt", txt)
-    print(txt)
-    return txt
-end
-
--- ═══════════════════════════════════════════════════════════════════
--- DUMP 2: BornIslandAirDropSystem — Full Structure
--- ═══════════════════════════════════════════════════════════════════
-_G.V34_DumpAirDropSys = function()
-    local out = {}
-    local function w(s) out[#out+1] = tostring(s) end
-    w("═══ BORN ISLAND AIR DROP SYSTEM DUMP ═══")
-
-    local path = "GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem"
-    local M = package.loaded[path]
+    -- 1. Get module
+    local M = package.loaded["GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem"]
     if not M then
-        w("MODULE NOT LOADED")
-        local txt = table.concat(out, "\n")
-        S("v34_airdrop_dump.txt", txt)
-        return txt
+        local ok, r = pcall(require, "GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem")
+        if ok then M = r end
     end
-
-    w("MODULE: " .. path)
-    w("Top keys: " .. (function() local n=0; for _ in pairs(M) do n=n+1 end; return n end)())
+    if type(M) ~= "table" then
+        P("V35", "BornIslandAirDropSystem not loaded")
+        return
+    end
 
     local i = M.__inner_impl
-    if type(i) == "table" then
-        w("")
-        w("── __inner_impl ──")
-        for k, v in pairs(i) do
-            local vt = type(v)
-            if vt == "function" then
-                local info = debug.getinfo(v, "S")
-                w(string.format("  fn %s (line %s)", tostring(k), tostring(info and info.linedefined or "?")))
-            elseif vt == "table" then
-                local n = 0; for _ in pairs(v) do n = n + 1 end
-                w(string.format("  tbl %s (%d keys)", tostring(k), n))
-            else
-                w(string.format("  %s %s = %s", vt, tostring(k), tostring(v)))
-            end
-        end
+    if type(i) ~= "table" then
+        P("V35", "No __inner_impl")
+        return
     end
 
-    local txt = table.concat(out, "\n")
-    S("v34_airdrop_dump.txt", txt)
-    print(txt)
+    results[#results+1] = "Module found"
+
+    -- 2. Check if instance exists (may need SubsystemMgr)
+    local inst = nil
+    pcall(function()
+        local SubMgr = require("GameLua.GameCore.Module.Subsystem.SubsystemMgr")
+        if SubMgr and type(SubMgr.Get) == "function" then
+            inst = SubMgr:Get("BornIslandAirDropSystem")
+        end
+    end)
+
+    if not inst then
+        -- Try module-level i as instance
+        inst = i
+        results[#results+1] = "Using module class as instance"
+    else
+        results[#results+1] = "Got real instance from SubsystemMgr"
+    end
+
+    -- 3. Build drop data
+    local dropData = buildDropData()
+    results[#results+1] = "Drop data built"
+
+    -- 4. Call CreateAirDrop
+    if type(inst.CreateAirDrop) == "function" then
+        -- Try multiple argument styles
+        local tries = {
+            { "dropData only", function() return inst:CreateAirDrop(dropData) end },
+            { "no args", function() return inst:CreateAirDrop() end },
+            { "self + dropData", function() return inst.CreateAirDrop(inst, dropData) end },
+            { "self only", function() return inst.CreateAirDrop(inst) end },
+        }
+
+        for _, t in ipairs(tries) do
+            local ok, err = pcall(t[2])
+            results[#results+1] = t[1] .. " = " .. (ok and "OK" or ("ERR: " .. tostring(err):sub(1, 60)))
+            if ok then break end
+        end
+    else
+        results[#results+1] = "CreateAirDrop not a function"
+    end
+
+    -- 5. Also try InitConfig + StartFight to prep
+    pcall(function()
+        if type(inst.InitConfig) == "function" then
+            inst:InitConfig()
+            results[#results+1] = "InitConfig called"
+        end
+    end)
+
+    pcall(function()
+        if type(inst.StartFight) == "function" then
+            inst:StartFight()
+            results[#results+1] = "StartFight called"
+        end
+    end)
+
+    local txt = table.concat(results, "\n")
+    S("v35_trigger.txt", txt)
+    P("V35 TRIGGER", txt)
     return txt
 end
 
 -- ═══════════════════════════════════════════════════════════════════
--- HOOK: CreateAirDrop — Capture parameters
+-- LIVE TRACE — capture real drop when it happens
 -- ═══════════════════════════════════════════════════════════════════
-_G._V34_TraceLog = {}
-_G._V34_TraceActive = false
+_G._V35_TraceLog = {}
+_G._V35_TraceActive = false
 
-_G.V34_HookAirDrop = function()
-    if _G._V34_TraceActive then return end
-    _G._V34_TraceActive = true
-    _G._V34_TraceLog = {}
+_G.V35_TraceStart = function()
+    if _G._V35_TraceActive then
+        P("V35", "Already tracing")
+        return
+    end
+    _G._V35_TraceActive = true
+    _G._V35_TraceLog = {}
 
     local function log(s)
-        _G._V34_TraceLog[#_G._V34_TraceLog+1] = string.format("[%s] %s", os.date("%H:%M:%S"), s)
+        _G._V35_TraceLog[#_G._V35_TraceLog+1] = 
+            string.format("[%s] %s", os.date("%H:%M:%S"), s)
     end
 
-    log("=== AIRDROP TRACE STARTED ===")
+    log("=== TRACE START ===")
 
-    -- Hook BornIslandAirDropSystem
-    local M = require("GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem")
-    local i = M and M.__inner_impl
-    if type(i) == "table" then
-        -- Hook CreateAirDrop
-        if type(i.CreateAirDrop) == "function" then
-            local orig = i.CreateAirDrop
-            i.CreateAirDrop = function(self, dropData, ...)
-                log("CreateAirDrop CALLED")
-                log("  dropData = " .. tostring(dropData))
-                if type(dropData) == "table" then
-                    for k, v in pairs(dropData) do
-                        log("    " .. tostring(k) .. " = " .. tostring(v))
-                    end
-                end
-                log("  self type = " .. type(self))
-                if type(self) == "table" then
-                    for k, v in pairs(self) do
-                        if type(v) ~= "function" then
-                            log("    self." .. tostring(k) .. " = " .. tostring(v))
+    -- Hook all functions of BornIslandAirDropSystem
+    pcall(function()
+        local M = require("GameLua.Mod.Library.GamePlay.Subsystem.BornIslandAirDropSystem")
+        local i = M and M.__inner_impl
+        if type(i) ~= "table" then return end
+
+        for name, fn in pairs(i) do
+            if type(fn) == "function" and type(name) == "string" then
+                local orig = fn
+                i[name] = function(self, ...)
+                    -- Log args
+                    local args = {}
+                    for n = 1, math.min(5, select("#", ...)) do
+                        local v = select(n, ...)
+                        if type(v) == "table" then
+                            local tblStr = "{"
+                            local cnt = 0
+                            for k, val in pairs(v) do
+                                cnt = cnt + 1
+                                if cnt > 8 then tblStr = tblStr .. "..." break end
+                                tblStr = tblStr .. tostring(k) .. "=" .. tostring(val):sub(1, 30) .. ", "
+                            end
+                            args[#args+1] = tblStr .. "}"
+                        else
+                            args[#args+1] = tostring(v):sub(1, 40)
                         end
                     end
-                end
-                local r = orig(self, dropData, ...)
-                log("  RETURN = " .. tostring(r))
-                return r
-            end
-            log("Hooked CreateAirDrop")
-        end
-
-        -- Hook other related functions
-        for _, fnName in ipairs({ "InitConfig", "OnInit", "StartFight", "GetCurrentDropTimeInfoItem" }) do
-            if type(i[fnName]) == "function" then
-                local orig = i[fnName]
-                i[fnName] = function(self, ...)
-                    log("CALL " .. fnName)
+                    log("CALL " .. name .. "(" .. table.concat(args, ", ") .. ")")
                     local ok, r = pcall(orig, self, ...)
-                    if not ok then log("  ERR: " .. tostring(r):sub(1, 100))
-                    elseif r ~= nil then log("  RET: " .. tostring(r):sub(1, 80)) end
+                    if not ok then
+                        log("  ✗ ERR: " .. tostring(r):sub(1, 200))
+                    elseif r ~= nil then
+                        log("  ↳ RET: " .. tostring(r):sub(1, 100))
+                    end
                     return r
                 end
-                log("Hooked " .. fnName)
             end
         end
-    end
+        log("Hooked all functions")
+    end)
 
     -- Auto-save
     pcall(function()
         local ticker = require("common.time_ticker")
         if ticker and ticker.AddTimerLoop then
             ticker.AddTimerLoop(0, function()
-                if _G._V34_TraceActive and #_G._V34_TraceLog > 0 then
-                    S("v34_airdrop_trace.txt", table.concat(_G._V34_TraceLog, "\n"))
+                if _G._V35_TraceActive and #_G._V35_TraceLog > 0 then
+                    S("v35_trace.txt", table.concat(_G._V35_TraceLog, "\n"))
                 end
-            end, -1, 10.0)
+            end, -1, 8.0)
         end
     end)
 
-    log("=== HOOKS READY ===")
-    P("V34 TRACE", "Airdrop trace active.\n\nMatch start karo, spawn island pe wait karo.\nDrop aane tak wait karo.\nPhir V34_Stop()")
+    P("V35 TRACE", "Trace ON.\n\n1. Match kholo\n2. Spawn island pe wait\n3. Drop aane tak\n4. V35_TraceStop()")
 end
 
-_G.V34_Stop = function()
-    _G._V34_TraceActive = false
-    local txt = table.concat(_G._V34_TraceLog or {}, "\n")
-    S("v34_airdrop_trace.txt", txt)
-    P("V34 STOP", "Saved: v34_airdrop_trace.txt\nLines: " .. #(_G._V34_TraceLog or {}))
+_G.V35_TraceStop = function()
+    _G._V35_TraceActive = false
+    local txt = table.concat(_G._V35_TraceLog or {}, "\n")
+    S("v35_trace.txt", txt)
+    P("V35 STOP", "Saved: v35_trace.txt\nLines: " .. #(_G._V35_TraceLog or {}))
 end
 
 -- ═══════════════════════════════════════════════════════════════════
@@ -256,18 +264,30 @@ pcall(function()
     local ticker = require("common.time_ticker")
     if ticker and ticker.AddTimerOnce then
         ticker.AddTimerOnce(3.0, function()
-            pcall(_G.V34_SearchBornIsland)
-        end)
-        ticker.AddTimerOnce(5.0, function()
-            pcall(_G.V34_DumpAirDropSys)
-        end)
-        ticker.AddTimerOnce(8.0, function()
-            pcall(_G.V34_HookAirDrop)
+            pcall(_G.V35_TraceStart)
         end)
     end
 end)
 
-S("v34_report.txt", "v34 loaded at " .. os.date() .. "\nTarget: BornIslandAirDropSystem\n")
-print("[V34] Loaded. Born Island dumper + air drop hook active.")
+S("v35_report.txt",
+    "v35 REPORT\n" ..
+    "Time: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n" ..
+    "Target: BornIslandAirDropSystem.CreateAirDrop\n" ..
+    "Vehicle: " .. CFG.vehicleID .. " | Skin: " .. CFG.skinResID .. "\n" ..
+    "\nCommands:\n" ..
+    "  V35_TriggerDrop()  -- manual trigger\n" ..
+    "  V35_TraceStart()   -- start trace\n" ..
+    "  V35_TraceStop()    -- save trace\n"
+)
+
+P("v35 LOADED",
+    "Fake Drop Ready\n\n" ..
+    "Vehicle: " .. CFG.vehicleID .. "\n" ..
+    "Skin: " .. CFG.skinResID .. "\n\n" ..
+    "Trace auto-start 3s baad.\n" ..
+    "Match start karo, spawn island pe.\n" ..
+    "15-20 sec baad V35_TraceStop()")
+
+print("[V35] Loaded. Trace auto-start in 3s.")
 
 return true
