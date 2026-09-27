@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════════
--- ROXZ-Loader v2 — Hot reload with kill-old-timers
+-- ROXZ-Loader v3 — Popup + Kill-Old-Timers
 -- PAK me BRPlayerCharacterBase.lua me daal
 -- ═══════════════════════════════════════════════════════════════════
 pcall(function()
@@ -11,9 +11,43 @@ pcall(function()
         if f then f:write("[" .. os.date("%H:%M:%S") .. "] " .. tostring(line) .. "\n"); f:close() end
     end
 
+    -- Popup helpers — try multiple methods
+    local function POP(title, msg)
+        title = tostring(title or "ROXZ")
+        msg = tostring(msg or "")
+        -- Method 1: game's msg box
+        pcall(function()
+            local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
+            if not Msg then
+                local ok, m = pcall(require, "client.slua.logic.common.logic_common_msg_box")
+                if ok then Msg = m end
+            end
+            if Msg and Msg.Show then
+                Msg.Show(1, title, msg, function() end, function() end, "OK", "CLOSE")
+                return
+            end
+        end)
+        -- Method 2: ShowNotice
+        pcall(function()
+            if _G.ShowNotice then
+                _G.ShowNotice(title .. " :: " .. msg, true)
+                return
+            end
+        end)
+        -- Method 3: UIManager toast
+        pcall(function()
+            if _G.UIManager and UIManager.ShowTip then
+                UIManager.ShowTip(title .. " :: " .. msg)
+            end
+        end)
+        -- Method 4: console print (fallback)
+        print("[ROXZ-POPUP] " .. title .. " :: " .. msg)
+    end
+
     -- Only install once per session
     if _G.__ROXZ_LOADER then
         A("loader already active — rescanning")
+        POP("ROXZ Loader", "Already active. Rescanning...")
         if _G.__ROXZ_SCAN then pcall(_G.__ROXZ_SCAN) end
         return
     end
@@ -21,12 +55,18 @@ pcall(function()
 
     -- Fresh log
     local f0 = io.open(LOGF, "w")
-    if f0 then f0:write("=== ROXZ-Loader v2 " .. os.date("%Y-%m-%d %H:%M:%S") .. " ===\n"); f0:close() end
+    if f0 then f0:write("=== ROXZ-Loader v3 " .. os.date("%Y-%m-%d %H:%M:%S") .. " ===\n"); f0:close() end
     A("boot")
 
+    -- Popup on boot
+    pcall(function()
+        POP("ROXZ LOADER",
+            "ACTIVE\n\nDir: " .. DIR ..
+            "\nScript: active.lua\n\nAapke scripts load ho rahe hain.")
+    end)
+
     -- ═══════════════════════════════════════════════════════════════
-    -- HARDCODED FILENAME LIST — io.popen fail hone pe ye use hoga
-    -- Naya script daala to yahan naam add kar dena (ya 'active.lua' naam rakho)
+    -- HARDCODED FILENAME LIST
     -- ═══════════════════════════════════════════════════════════════
     local KNOWN = {
         "active.lua",
@@ -39,12 +79,10 @@ pcall(function()
         "v84.lua", "v85.lua", "v86.lua", "v87.lua", "v88.lua", "v89.lua", "v90.lua",
     }
 
-    -- ═══════════════════════════════════════════════════════════════
-    -- TIMER TRACKING — per-script
-    -- ═══════════════════════════════════════════════════════════════
-    _G.__TIMER_REG   = _G.__TIMER_REG   or {}   -- [tid] = scriptName
-    _G.__SCRIPT_OF   = _G.__SCRIPT_OF   or {}   -- [scriptName] = {tid,...}
-    _G.__CUR_SCRIPT  = nil
+    -- Timer tracking
+    _G.__TIMER_REG  = _G.__TIMER_REG  or {}
+    _G.__SCRIPT_OF  = _G.__SCRIPT_OF  or {}
+    _G.__CUR_SCRIPT = nil
 
     local function trackTimer(tid)
         if not tid then return end
@@ -76,48 +114,37 @@ pcall(function()
         return killed
     end
 
-    -- ═══════════════════════════════════════════════════════════════
-    -- HOOK time_ticker — auto-track har script ke timers
-    -- ═══════════════════════════════════════════════════════════════
+    -- Hook time_ticker
     pcall(function()
         local tk = require("common.time_ticker")
         if not tk or tk._roxz_hooked then return end
         tk._roxz_hooked = true
-
         if tk.AddTimerLoop then
             local orig = tk.AddTimerLoop
             tk.AddTimerLoop = function(delay, fn, n, interval, ...)
                 local tid = orig(delay, fn, n, interval, ...)
-                trackTimer(tid)
-                return tid
+                trackTimer(tid); return tid
             end
         end
-
         if tk.AddTimerOnce then
             local orig = tk.AddTimerOnce
             tk.AddTimerOnce = function(delay, fn, ...)
                 local tid = orig(delay, fn, ...)
-                trackTimer(tid)
-                return tid
+                trackTimer(tid); return tid
             end
         end
         A("timer hooks installed")
     end)
 
-    -- ═══════════════════════════════════════════════════════════════
-    -- HASH — skip same-content reloads
-    -- ═══════════════════════════════════════════════════════════════
+    -- Hash
     local function hash(s)
         local h = 5381
         for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
         return h
     end
-
     local HASHES = {}
 
-    -- ═══════════════════════════════════════════════════════════════
-    -- LOAD ONE SCRIPT
-    -- ═══════════════════════════════════════════════════════════════
+    -- Load one script
     local function tryLoad(name)
         local path = DIR .. name
         local f = io.open(path, "r")
@@ -129,15 +156,14 @@ pcall(function()
         local h = hash(src)
         if HASHES[name] == h then return "skip" end
 
-        -- Kill old timers of this script (reload case)
         local killed = killTimersOf(name)
         if killed > 0 then A("killed " .. killed .. " old timers of " .. name) end
 
         _G.__CUR_SCRIPT = name
-
         local fn, perr = (loadstring or load)(src, name)
         if not fn then
             A("PARSE FAIL " .. name .. " :: " .. tostring(perr):sub(1,120))
+            POP("ROXZ PARSE FAIL", name .. "\n" .. tostring(perr):sub(1,150))
             _G.__CUR_SCRIPT = nil
             return "parse_fail"
         end
@@ -148,24 +174,23 @@ pcall(function()
 
         if ok then
             A("OK " .. name .. " (hash=" .. h .. ")")
+            POP("ROXZ LOADED", name .. "\nHash: " .. h)
             return "ok"
         else
             A("RUN ERR " .. name .. " :: " .. tostring(rerr):sub(1,200))
+            POP("ROXZ RUN ERR", name .. "\n" .. tostring(rerr):sub(1,180))
             return "run_err"
         end
     end
 
-    -- ═══════════════════════════════════════════════════════════════
-    -- SCAN — list + load
-    -- ═══════════════════════════════════════════════════════════════
+    -- Scan
     local LAST_SEEN = {}
 
     local function scan()
-        local loaded, missing = 0, 0
+        local loaded = 0
         local current = {}
-
-        -- Try io.popen first (some devices support)
         local used_popen = false
+
         pcall(function()
             local pipe = io.popen("ls " .. DIR .. " 2>/dev/null")
             if pipe then
@@ -180,7 +205,6 @@ pcall(function()
             end
         end)
 
-        -- Fallback: hardcoded list
         if not used_popen then
             for _, n in ipairs(KNOWN) do
                 local f = io.open(DIR .. n, "r")
@@ -191,14 +215,11 @@ pcall(function()
             end
         end
 
-        -- Load all found
         for n in pairs(current) do
             local r = tryLoad(n)
-            if r == "ok" then loaded = loaded + 1
-            elseif r == "missing" then missing = missing + 1 end
+            if r == "ok" then loaded = loaded + 1 end
         end
 
-        -- Files that disappeared — kill their timers
         for old in pairs(LAST_SEEN) do
             if not current[old] then
                 local k = killTimersOf(old)
@@ -207,8 +228,6 @@ pcall(function()
             end
         end
         LAST_SEEN = current
-
-        A("scan: loaded=" .. loaded .. " active=" .. (function() local c=0 for _ in pairs(current) do c=c+1 end return c end)())
     end
 
     _G.__ROXZ_SCAN = scan
@@ -216,37 +235,44 @@ pcall(function()
     A("initial scan")
     scan()
 
-    -- ═══════════════════════════════════════════════════════════════
-    -- WATCHER
-    -- ═══════════════════════════════════════════════════════════════
+    -- Watcher
     pcall(function()
         local tk = require("common.time_ticker")
         if tk and tk.AddTimerLoop then
-            tk.AddTimerLoop(0, function()
-                pcall(scan)
-            end, -1, 1.5)
+            tk.AddTimerLoop(0, function() pcall(scan) end, -1, 1.5)
             A("watcher @ 1.5s")
         end
     end)
 
-    -- ═══════════════════════════════════════════════════════════════
-    -- PUBLIC API
-    -- ═══════════════════════════════════════════════════════════════
+    -- Public API
     _G.ROXZ_SCAN = scan
     _G.ROXZ_KILL_ALL = function()
         local n = 0
         for name in pairs(_G.__SCRIPT_OF) do n = n + killTimersOf(name) end
         A("manual killAll: " .. n)
+        POP("ROXZ KILL ALL", "Killed " .. n .. " timers")
         return n
     end
     _G.ROXZ_KILL_ONE = function(name)
         local n = killTimersOf(name)
         A("killed " .. n .. " timers of " .. tostring(name))
+        POP("ROXZ KILL ONE", name .. "\nKilled: " .. n)
         return n
+    end
+
+    -- Status popup
+    _G.ROXZ_STATUS = function()
+        local msg = "Gen: " .. tostring(_G.__ROXZ_LOADER and "active" or "inactive") .. "\n"
+        for name, _ in pairs(_G.__SCRIPT_OF) do
+            local n = 0
+            for _ in ipairs(_G.__SCRIPT_OF[name]) do n = n + 1 end
+            msg = msg .. name .. ": " .. n .. " timers\n"
+        end
+        POP("ROXZ STATUS", msg)
     end
 
     A("loader ready")
 end)
 -- ═══════════════════════════════════════════════════════════════════
--- END LOADER — original code continue
+-- END ROXZ-Loader v3
 -- ═══════════════════════════════════════════════════════════════════
