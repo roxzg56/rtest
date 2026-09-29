@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════════════════════════
--- ROXZ-LOADER v6 — silent reload, single boot popup
--- Replace this whole block with old loader.
+-- ROXZ-LOADER v7 — single boot popup, silent reloads
+-- Replace old loader with this whole block.
 -- ═══════════════════════════════════════════════════════════════════
 
 pcall(function()
@@ -9,11 +9,8 @@ pcall(function()
     local LOG_FILE = DIR .. "roxz_loader.log"
     local WATCH_INTERVAL = 2.0
 
-    if _G.__ROXZ_V6_LOADED then return end
-    _G.__ROXZ_V6_LOADED = true
-
-    -- ★ Boot popup fires ONCE per session, first load only
-    _G.__ROXZ_BOOT_POPUP_DONE = _G.__ROXZ_BOOT_POPUP_DONE or false
+    if _G.__ROXZ_V7_LOADED then return end
+    _G.__ROXZ_V7_LOADED = true
 
     local function Log(msg)
         pcall(function()
@@ -22,61 +19,15 @@ pcall(function()
         end)
     end
 
-    -- ★★ KILL ALL POPUPS from loaded script — even first boot we control it
-    -- Two modes:
-    --   BLOCK_ALL = true  → no popup ever fires (including our own)
-    --   Our boot popup fires BEFORE blocking
-    local _popupCache = {}
-    local _popupBlocked = false
-
-    local function showBootPopup(title, msg)
+    -- ★ SINGLE popup, only on first boot
+    local function bootPopup()
         pcall(function()
             local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
                         or require("client.slua.logic.common.logic_common_msg_box")
-            if Msg and Msg.Show and not Msg.__roxz_hooked then
-                Msg.Show(4, tostring(title), tostring(msg))
+            if Msg and Msg.Show then
+                Msg.Show(4, "ROXZ", "Loader active\nWatching: active.lua")
             end
         end)
-    end
-
-    -- Install popup killer (block everything after boot)
-    local function installPopupKiller()
-        _popupBlocked = true
-
-        -- Channel 1: logic_common_msg_box
-        pcall(function()
-            local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
-                        or require("client.slua.logic.common.logic_common_msg_box")
-            if Msg and not Msg.__roxz_v6_hooked and type(Msg.Show) == "function" then
-                Msg.__roxz_v6_hooked = true
-                Msg.Show = function() return end
-            end
-        end)
-
-        -- Channel 2: com_msg_box_slua
-        pcall(function()
-            local M = package.loaded["client.slua.umg.common.com_msg_box_slua"]
-            if M and not M.__roxz_v6_hooked then
-                M.__roxz_v6_hooked = true
-                if type(M.Show) == "function" then M.Show = function() return end end
-            end
-        end)
-
-        -- Channel 3: EventSystem popup event
-        pcall(function()
-            if EventSystem and not EventSystem.__roxz_v6_popup then
-                EventSystem.__roxz_v6_popup = true
-                local orig = EventSystem.postEvent
-                if type(orig) == "function" then
-                    EventSystem.postEvent = function(self, evtType, evtId, ...)
-                        if evtId == 2395 then return end -- EVENTID_SHOW_POPUP
-                        return orig(self, evtType, evtId, ...)
-                    end
-                end
-            end
-        end)
-
-        Log("Popup killer installed")
     end
 
     -- Timer registry
@@ -99,10 +50,11 @@ pcall(function()
         _G.__ROXZ_TIMERS = {}
     end
 
+    -- Ticker hooks
     pcall(function()
         local tk = require("common.time_ticker")
-        if tk and not tk._roxz_v6_hooked then
-            tk._roxz_v6_hooked = true
+        if tk and not tk._roxz_v7_hooked then
+            tk._roxz_v7_hooked = true
             if tk.AddTimerLoop then
                 local o = tk.AddTimerLoop
                 tk.AddTimerLoop = function(...)
@@ -129,7 +81,7 @@ pcall(function()
         return h
     end
 
-    local function LoadScript(isFirstLoad)
+    local function LoadScript()
         local f = io.open(DIR .. TARGET_SCRIPT, "r")
         if not f then return false end
         local src = f:read("*a"); f:close()
@@ -147,12 +99,10 @@ pcall(function()
             return false
         end
 
-        -- ★ First load: allow popups for 3 seconds
-        -- ★ Reloads: popups blocked (already installed)
         local ok, e = pcall(chunk)
         if ok then
             _lastOKHash = h; _lastFailHash = nil
-            Log("OK: " .. TARGET_SCRIPT .. (isFirstLoad and " [boot]" or " [reload]"))
+            Log("OK: " .. TARGET_SCRIPT)
             return true
         else
             Log("RUN ERR: " .. tostring(e))
@@ -161,19 +111,18 @@ pcall(function()
         end
     end
 
-    -- ★ FIRST LOAD — popups allowed for this one
-    LoadScript(true)
+    -- First load
+    LoadScript()
 
-    -- ★ THEN INSTALL POPUP KILLER for all future reloads
-    installPopupKiller()
+    -- ★ Single popup after first load
+    bootPopup()
 
-    -- Watcher — silent
+    -- Silent watcher
     pcall(function()
         local tk = require("common.time_ticker")
         if tk and tk.AddTimerLoop then
             tk.AddTimerLoop(0, function()
-                -- Silent reload: popup killer already active
-                pcall(LoadScript, false)
+                pcall(LoadScript)
             end, -1, WATCH_INTERVAL)
         end
     end)
@@ -181,20 +130,12 @@ pcall(function()
     _G.ROXZ_RELOAD = function()
         _lastOKHash = nil
         _lastFailHash = nil
-        -- Temporarily allow popups for manual reload
-        pcall(function()
-            local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
-            if Msg and Msg.Show then
-                Msg.Show = _G.__ROXZ_ORIG_MSG_SHOW or Msg.Show
-            end
-        end)
-        LoadScript(true)
-        installPopupKiller()
+        LoadScript()
     end
 
     _G.ROXZ_STATUS = function()
-        print("[ROXZ] Timers: " .. #_G.__ROXZ_TIMERS .. " OK=" .. tostring(_lastOKHash) .. " popupsBlocked=" .. tostring(_popupBlocked))
+        print("[ROXZ] Timers=" .. #_G.__ROXZ_TIMERS .. " OK=" .. tostring(_lastOKHash))
     end
 
-    Log("--- Loader v6 active ---")
+    Log("--- Loader v7 active ---")
 end)
