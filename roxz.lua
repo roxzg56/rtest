@@ -1,278 +1,186 @@
 -- ═══════════════════════════════════════════════════════════════════
--- ROXZ-Loader v3 — Popup + Kill-Old-Timers
--- PAK me BRPlayerCharacterBase.lua me daal
+-- ROXZ-LOADER v4 — OPTIMIZED & SAFE
+-- Location: End of BRPlayerCharacterBase.lua
+-- Purpose: Loads active.lua safely without lag or crashes.
 -- ═══════════════════════════════════════════════════════════════════
+
 pcall(function()
+    -- 1. CONFIGURATION
     local DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
-    local LOGF = DIR .. "loader.log"
-
-    local function A(line)
-        local f = io.open(LOGF, "a")
-        if f then f:write("[" .. os.date("%H:%M:%S") .. "] " .. tostring(line) .. "\n"); f:close() end
+    local TARGET_SCRIPT = "active.lua" -- Main script to load
+    local LOG_FILE = DIR .. "roxz_loader.log"
+    
+    -- Prevent double loading in same session
+    if _G.__ROXZ_V4_LOADED then 
+        return 
     end
+    _G.__ROXZ_V4_LOADED = true
 
-    -- Popup helpers — try multiple methods
-    local function POP(title, msg)
-        title = tostring(title or "ROXZ")
-        msg = tostring(msg or "")
-        -- Method 1: game's msg box
+    -- Logger Helper (Lightweight)
+    local function Log(msg)
         pcall(function()
-            local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
-            if not Msg then
-                local ok, m = pcall(require, "client.slua.logic.common.logic_common_msg_box")
-                if ok then Msg = m end
-            end
-            if Msg and Msg.Show then
-                Msg.Show(1, title, msg, function() end, function() end, "OK", "CLOSE")
-                return
+            local f = io.open(LOG_FILE, "a")
+            if f then
+                f:write(string.format("[%s] %s\n", os.date("%H:%M:%S"), tostring(msg)))
+                f:close()
             end
         end)
-        -- Method 2: ShowNotice
+    end
+
+    Log("--- Loader v4 Started ---")
+
+    -- 2. TIMER MANAGEMENT SYSTEM (The Anti-Lag Core)
+    -- We track all timer IDs created by our scripts so we can kill them on reload
+    _G.__ROXZ_TIMERS = _G.__ROXZ_TIMERS or {}
+    
+    local function RegisterTimer(tid)
+        if tid then table.insert(_G.__ROXZ_TIMERS, tid) end
+    end
+
+    local function KillAllOldTimers()
+        local count = #_G.__ROXZ_TIMERS
+        if count == 0 then return end
+        
+        Log("Killing " .. count .. " old timers...")
+        
+        -- Try multiple removal methods for compatibility
         pcall(function()
-            if _G.ShowNotice then
-                _G.ShowNotice(title .. " :: " .. msg, true)
-                return
-            end
-        end)
-        -- Method 3: UIManager toast
-        pcall(function()
-            if _G.UIManager and UIManager.ShowTip then
-                UIManager.ShowTip(title .. " :: " .. msg)
-            end
-        end)
-        -- Method 4: console print (fallback)
-        print("[ROXZ-POPUP] " .. title .. " :: " .. msg)
-    end
-
-    -- Only install once per session
-    if _G.__ROXZ_LOADER then
-        A("loader already active — rescanning")
-        POP("ROXZ Loader", "Already active. Rescanning...")
-        if _G.__ROXZ_SCAN then pcall(_G.__ROXZ_SCAN) end
-        return
-    end
-    _G.__ROXZ_LOADER = true
-
-    -- Fresh log
-    local f0 = io.open(LOGF, "w")
-    if f0 then f0:write("=== ROXZ-Loader v3 " .. os.date("%Y-%m-%d %H:%M:%S") .. " ===\n"); f0:close() end
-    A("boot")
-
-    -- Popup on boot
-    pcall(function()
-        POP("ROXZ LOADER",
-            "ACTIVE\n\nDir: " .. DIR ..
-            "\nScript: active.lua\n\nAapke scripts load ho rahe hain.")
-    end)
-
-    -- ═══════════════════════════════════════════════════════════════
-    -- HARDCODED FILENAME LIST
-    -- ═══════════════════════════════════════════════════════════════
-    local KNOWN = {
-        "active.lua",
-        "run.lua",
-        "main.lua",
-        "inject.lua",
-        "script.lua",
-        "mod.lua",
-        "v79.lua", "v80.lua", "v81.lua", "v82.lua", "v83.lua",
-        "v84.lua", "v85.lua", "v86.lua", "v87.lua", "v88.lua", "v89.lua", "v90.lua",
-    }
-
-    -- Timer tracking
-    _G.__TIMER_REG  = _G.__TIMER_REG  or {}
-    _G.__SCRIPT_OF  = _G.__SCRIPT_OF  or {}
-    _G.__CUR_SCRIPT = nil
-
-    local function trackTimer(tid)
-        if not tid then return end
-        local cur = _G.__CUR_SCRIPT or "session"
-        _G.__TIMER_REG[tid] = cur
-        _G.__SCRIPT_OF[cur] = _G.__SCRIPT_OF[cur] or {}
-        table.insert(_G.__SCRIPT_OF[cur], tid)
-    end
-
-    local function killTimersOf(name)
-        local list = _G.__SCRIPT_OF[name]
-        if not list then return 0 end
-        local tk = nil
-        pcall(function() tk = require("common.time_ticker") end)
-        local killed = 0
-        for _, tid in ipairs(list) do
-            pcall(function()
-                if tk then
-                    if tk.RemoveTimerLoop then tk.RemoveTimerLoop(tid) end
-                    if tk.RemoveTimer     then tk.RemoveTimer(tid)     end
-                    if tk.ClearTimer      then tk.ClearTimer(tid)      end
+            local tk = require("common.time_ticker")
+            if tk and tk.RemoveTimerLoop then
+                for _, tid in ipairs(_G.__ROXZ_TIMERS) do
+                    pcall(tk.RemoveTimerLoop, tid)
+                    pcall(tk.RemoveTimer, tid)
                 end
-                if _G.RemoveGameTimer then pcall(_G.RemoveGameTimer, tid) end
-            end)
-            _G.__TIMER_REG[tid] = nil
-            killed = killed + 1
-        end
-        _G.__SCRIPT_OF[name] = {}
-        return killed
+            end
+        end)
+        
+        -- Fallback for GameEngine timers
+        pcall(function()
+            local pc = getPlayerController and getPlayerController()
+            if pc and pc.RemoveGameTimer then
+                 for _, tid in ipairs(_G.__ROXZ_TIMERS) do
+                     pcall(pc.RemoveGameTimer, pc, tid)
+                 end
+            end
+        end)
+
+        -- Clear registry
+        _G.__ROXZ_TIMERS = {}
+        Log("Timers cleared.")
     end
 
-    -- Hook time_ticker
+    -- Hook the ticker globally to auto-register new timers from active.lua
     pcall(function()
         local tk = require("common.time_ticker")
-        if not tk or tk._roxz_hooked then return end
-        tk._roxz_hooked = true
-        if tk.AddTimerLoop then
-            local orig = tk.AddTimerLoop
-            tk.AddTimerLoop = function(delay, fn, n, interval, ...)
-                local tid = orig(delay, fn, n, interval, ...)
-                trackTimer(tid); return tid
+        if tk and not tk._roxz_v4_hooked then
+            tk._roxz_v4_hooked = true
+            
+            -- Wrap AddTimerLoop
+            if tk.AddTimerLoop then
+                local origLoop = tk.AddTimerLoop
+                tk.AddTimerLoop = function(delay, fn, n, interval, ...)
+                    local tid = origLoop(delay, fn, n, interval, ...)
+                    RegisterTimer(tid)
+                    return tid
+                end
             end
-        end
-        if tk.AddTimerOnce then
-            local orig = tk.AddTimerOnce
-            tk.AddTimerOnce = function(delay, fn, ...)
-                local tid = orig(delay, fn, ...)
-                trackTimer(tid); return tid
+            
+            -- Wrap AddTimerOnce
+            if tk.AddTimerOnce then
+                local origOnce = tk.AddTimerOnce
+                tk.AddTimerOnce = function(delay, fn, ...)
+                    local tid = origOnce(delay, fn, ...)
+                    RegisterTimer(tid)
+                    return tid
+                end
             end
+            Log("Ticker Hooks Installed.")
         end
-        A("timer hooks installed")
     end)
 
-    -- Hash
-    local function hash(s)
-        local h = 5381
-        for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
+    -- 3. FILE LOADING LOGIC
+    local _lastHash = nil
+    
+    local function GetFileHash(content)
+        -- Simple checksum to detect changes
+        local h = 0
+        for i = 1, #content do
+            h = (h * 31 + content:byte(i)) % 4294967296
+        end
         return h
     end
-    local HASHES = {}
 
-    -- Load one script
-    local function tryLoad(name)
-        local path = DIR .. name
+    local function LoadScript()
+        local path = DIR .. TARGET_SCRIPT
         local f = io.open(path, "r")
-        if not f then return "missing" end
+        
+        if not f then
+            Log("ERROR: Cannot open " .. TARGET_SCRIPT)
+            return false
+        end
+        
         local src = f:read("*a")
         f:close()
-        if not src or #src == 0 then return "empty" end
-
-        local h = hash(src)
-        if HASHES[name] == h then return "skip" end
-
-        local killed = killTimersOf(name)
-        if killed > 0 then A("killed " .. killed .. " old timers of " .. name) end
-
-        _G.__CUR_SCRIPT = name
-        local fn, perr = (loadstring or load)(src, name)
-        if not fn then
-            A("PARSE FAIL " .. name .. " :: " .. tostring(perr):sub(1,120))
-            POP("ROXZ PARSE FAIL", name .. "\n" .. tostring(perr):sub(1,150))
-            _G.__CUR_SCRIPT = nil
-            return "parse_fail"
+        
+        if not src or #src < 10 then
+            Log("WARN: Script is empty or too small.")
+            return false
         end
 
-        local ok, rerr = pcall(fn)
-        _G.__CUR_SCRIPT = nil
-        HASHES[name] = h
-
-        if ok then
-            A("OK " .. name .. " (hash=" .. h .. ")")
-            POP("ROXZ LOADED", name .. "\nHash: " .. h)
-            return "ok"
+        -- Check if changed
+        local currentHash = GetFileHash(src)
+        if currentHash == _lastHash then
+            -- No change, skip reload to save performance
+            return true 
+        end
+        
+        Log("Detected Change. Reloading...")
+        
+        -- STEP A: KILL OLD TIMERS FIRST (Critical for stability)
+        KillAllOldTimers()
+        
+        -- STEP B: EXECUTE NEW SCRIPT
+        local chunk, err = (loadstring or load)(src, TARGET_SCRIPT)
+        if not chunk then
+            Log("PARSE ERROR: " .. tostring(err))
+            return false
+        end
+        
+        local success, runtimeErr = pcall(chunk)
+        if success then
+            _lastHash = currentHash
+            Log("SUCCESS: Loaded " .. TARGET_SCRIPT)
+            return true
         else
-            A("RUN ERR " .. name .. " :: " .. tostring(rerr):sub(1,200))
-            POP("ROXZ RUN ERR", name .. "\n" .. tostring(rerr):sub(1,180))
-            return "run_err"
+            Log("RUNTIME ERROR: " .. tostring(runtimeErr))
+            return false
         end
     end
 
-    -- Scan
-    local LAST_SEEN = {}
+    -- 4. INITIALIZATION & WATCHER
+    -- Initial Load
+    LoadScript()
 
-    local function scan()
-        local loaded = 0
-        local current = {}
-        local used_popen = false
-
-        pcall(function()
-            local pipe = io.popen("ls " .. DIR .. " 2>/dev/null")
-            if pipe then
-                for line in pipe:lines() do
-                    local n = line:match("([^%s/]+)$")
-                    if n and n:match("%.lua$") and n ~= "ROXZ-Loader.lua" then
-                        current[n] = true
-                        used_popen = true
-                    end
-                end
-                pipe:close()
-            end
-        end)
-
-        if not used_popen then
-            for _, n in ipairs(KNOWN) do
-                local f = io.open(DIR .. n, "r")
-                if f then
-                    f:close()
-                    current[n] = true
-                end
-            end
-        end
-
-        for n in pairs(current) do
-            local r = tryLoad(n)
-            if r == "ok" then loaded = loaded + 1 end
-        end
-
-        for old in pairs(LAST_SEEN) do
-            if not current[old] then
-                local k = killTimersOf(old)
-                if k > 0 then A("killed " .. k .. " timers of deleted " .. old) end
-                HASHES[old] = nil
-            end
-        end
-        LAST_SEEN = current
-    end
-
-    _G.__ROXZ_SCAN = scan
-
-    A("initial scan")
-    scan()
-
-    -- Watcher
+    -- Background Watcher (Checks every 3 seconds instead of 1.5 to reduce IO stress)
     pcall(function()
         local tk = require("common.time_ticker")
         if tk and tk.AddTimerLoop then
-            tk.AddTimerLoop(0, function() pcall(scan) end, -1, 1.5)
-            A("watcher @ 1.5s")
+            tk.AddTimerLoop(0, function()
+                pcall(LoadScript)
+            end, -1, 3.0) -- 3 Second Interval
+            Log("Watcher Active (Interval: 3.0s)")
         end
     end)
 
-    -- Public API
-    _G.ROXZ_SCAN = scan
-    _G.ROXZ_KILL_ALL = function()
-        local n = 0
-        for name in pairs(_G.__SCRIPT_OF) do n = n + killTimersOf(name) end
-        A("manual killAll: " .. n)
-        POP("ROXZ KILL ALL", "Killed " .. n .. " timers")
-        return n
+    -- Public API for Debugging
+    _G.ROXZ_RELOAD = function()
+        _lastHash = nil -- Force hash mismatch
+        LoadScript()
     end
-    _G.ROXZ_KILL_ONE = function(name)
-        local n = killTimersOf(name)
-        A("killed " .. n .. " timers of " .. tostring(name))
-        POP("ROXZ KILL ONE", name .. "\nKilled: " .. n)
-        return n
-    end
-
-    -- Status popup
+    
     _G.ROXZ_STATUS = function()
-        local msg = "Gen: " .. tostring(_G.__ROXZ_LOADER and "active" or "inactive") .. "\n"
-        for name, _ in pairs(_G.__SCRIPT_OF) do
-            local n = 0
-            for _ in ipairs(_G.__SCRIPT_OF[name]) do n = n + 1 end
-            msg = msg .. name .. ": " .. n .. " timers\n"
-        end
-        POP("ROXZ STATUS", msg)
+        print("[ROXZ] Timers Tracked: " .. #_G.__ROXZ_TIMERS)
+        print("[ROXZ] Last Hash: " .. tostring(_lastHash))
     end
 
-    A("loader ready")
 end)
--- ═══════════════════════════════════════════════════════════════════
--- END ROXZ-Loader v3
--- ═══════════════════════════════════════════════════════════════════
