@@ -1,22 +1,17 @@
 -- ═══════════════════════════════════════════════════════════════════
--- ROXZ-LOADER v4 — OPTIMIZED & SAFE
+-- ROXZ-LOADER v5 — popup-dedup, failed-hash cache, safe timers
 -- Location: End of BRPlayerCharacterBase.lua
--- Purpose: Loads active.lua safely without lag or crashes.
 -- ═══════════════════════════════════════════════════════════════════
 
 pcall(function()
-    -- 1. CONFIGURATION
     local DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/"
-    local TARGET_SCRIPT = "active.lua" -- Main script to load
+    local TARGET_SCRIPT = "active.lua"
     local LOG_FILE = DIR .. "roxz_loader.log"
-    
-    -- Prevent double loading in same session
-    if _G.__ROXZ_V4_LOADED then 
-        return 
-    end
-    _G.__ROXZ_V4_LOADED = true
+    local WATCH_INTERVAL = 3.0
 
-    -- Logger Helper (Lightweight)
+    if _G.__ROXZ_V5_LOADED then return end
+    _G.__ROXZ_V5_LOADED = true
+
     local function Log(msg)
         pcall(function()
             local f = io.open(LOG_FILE, "a")
@@ -27,82 +22,84 @@ pcall(function()
         end)
     end
 
-    Log("--- Loader v4 Started ---")
+    -- ★ POPUP DEDUP — kills the "popup on every reload" bug
+    -- Hooks the game's msg box. Same title+msg within COOLDOWN = suppressed.
+    local _popupCache = {}
+    local POPUP_COOLDOWN = 30    -- seconds. Tune to taste.
+    local function installPopupGuard()
+        pcall(function()
+            local Msg = package.loaded["client.slua.logic.common.logic_common_msg_box"]
+                        or require("client.slua.logic.common.logic_common_msg_box")
+            if not Msg or Msg.__roxz_v5_hooked then return end
+            Msg.__roxz_v5_hooked = true
+            local orig = Msg.Show
+            if type(orig) ~= "function" then return end
+            Msg.Show = function(kind, title, msg, ...)
+                local key = tostring(title) .. "|" .. tostring(msg)
+                local now = os.clock()
+                local last = _popupCache[key]
+                if last and (now - last) < POPUP_COOLDOWN then
+                    return
+                end
+                _popupCache[key] = now
+                return orig(kind, title, msg, ...)
+            end
+            Log("Popup guard installed (cooldown=" .. POPUP_COOLDOWN .. "s)")
+        end)
+    end
+    installPopupGuard()
 
-    -- 2. TIMER MANAGEMENT SYSTEM (The Anti-Lag Core)
-    -- We track all timer IDs created by our scripts so we can kill them on reload
+    -- Timer registry
     _G.__ROXZ_TIMERS = _G.__ROXZ_TIMERS or {}
-    
     local function RegisterTimer(tid)
         if tid then table.insert(_G.__ROXZ_TIMERS, tid) end
     end
-
     local function KillAllOldTimers()
         local count = #_G.__ROXZ_TIMERS
         if count == 0 then return end
-        
-        Log("Killing " .. count .. " old timers...")
-        
-        -- Try multiple removal methods for compatibility
         pcall(function()
             local tk = require("common.time_ticker")
-            if tk and tk.RemoveTimerLoop then
+            if tk then
                 for _, tid in ipairs(_G.__ROXZ_TIMERS) do
-                    pcall(tk.RemoveTimerLoop, tid)
-                    pcall(tk.RemoveTimer, tid)
+                    if tk.RemoveTimerLoop then pcall(tk.RemoveTimerLoop, tid) end
+                    if tk.RemoveTimer then pcall(tk.RemoveTimer, tid) end
                 end
             end
         end)
-        
-        -- Fallback for GameEngine timers
-        pcall(function()
-            local pc = getPlayerController and getPlayerController()
-            if pc and pc.RemoveGameTimer then
-                 for _, tid in ipairs(_G.__ROXZ_TIMERS) do
-                     pcall(pc.RemoveGameTimer, pc, tid)
-                 end
-            end
-        end)
-
-        -- Clear registry
         _G.__ROXZ_TIMERS = {}
-        Log("Timers cleared.")
+        Log("Killed " .. count .. " timers")
     end
 
-    -- Hook the ticker globally to auto-register new timers from active.lua
+    -- Hook ticker for auto-register
     pcall(function()
         local tk = require("common.time_ticker")
-        if tk and not tk._roxz_v4_hooked then
-            tk._roxz_v4_hooked = true
-            
-            -- Wrap AddTimerLoop
+        if tk and not tk._roxz_v5_hooked then
+            tk._roxz_v5_hooked = true
             if tk.AddTimerLoop then
-                local origLoop = tk.AddTimerLoop
-                tk.AddTimerLoop = function(delay, fn, n, interval, ...)
-                    local tid = origLoop(delay, fn, n, interval, ...)
+                local o = tk.AddTimerLoop
+                tk.AddTimerLoop = function(...)
+                    local tid = o(...)
                     RegisterTimer(tid)
                     return tid
                 end
             end
-            
-            -- Wrap AddTimerOnce
             if tk.AddTimerOnce then
-                local origOnce = tk.AddTimerOnce
-                tk.AddTimerOnce = function(delay, fn, ...)
-                    local tid = origOnce(delay, fn, ...)
+                local o = tk.AddTimerOnce
+                tk.AddTimerOnce = function(...)
+                    local tid = o(...)
                     RegisterTimer(tid)
                     return tid
                 end
             end
-            Log("Ticker Hooks Installed.")
         end
     end)
 
-    -- 3. FILE LOADING LOGIC
-    local _lastHash = nil
-    
-    local function GetFileHash(content)
-        -- Simple checksum to detect changes
+    local _lastOKHash = nil
+    local _lastFailHash = nil
+    local _lastFailTime = 0
+    local FAIL_BACKOFF = 15   -- sec — don't spam-retry a broken script
+
+    local function Hash(content)
         local h = 0
         for i = 1, #content do
             h = (h * 31 + content:byte(i)) % 4294967296
@@ -113,74 +110,61 @@ pcall(function()
     local function LoadScript()
         local path = DIR .. TARGET_SCRIPT
         local f = io.open(path, "r")
-        
-        if not f then
-            Log("ERROR: Cannot open " .. TARGET_SCRIPT)
-            return false
-        end
-        
-        local src = f:read("*a")
-        f:close()
-        
-        if not src or #src < 10 then
-            Log("WARN: Script is empty or too small.")
-            return false
+        if not f then Log("Cannot open " .. TARGET_SCRIPT); return false end
+        local src = f:read("*a"); f:close()
+        if not src or #src < 10 then return false end
+
+        local h = Hash(src)
+        if h == _lastOKHash then return true end                    -- unchanged OK
+        if h == _lastFailHash and (os.clock() - _lastFailTime) < FAIL_BACKOFF then
+            return false                                            -- recently failed, back off
         end
 
-        -- Check if changed
-        local currentHash = GetFileHash(src)
-        if currentHash == _lastHash then
-            -- No change, skip reload to save performance
-            return true 
-        end
-        
-        Log("Detected Change. Reloading...")
-        
-        -- STEP A: KILL OLD TIMERS FIRST (Critical for stability)
         KillAllOldTimers()
-        
-        -- STEP B: EXECUTE NEW SCRIPT
+
         local chunk, err = (loadstring or load)(src, TARGET_SCRIPT)
         if not chunk then
             Log("PARSE ERROR: " .. tostring(err))
+            _lastFailHash = h
+            _lastFailTime = os.clock()
             return false
         end
-        
-        local success, runtimeErr = pcall(chunk)
-        if success then
-            _lastHash = currentHash
-            Log("SUCCESS: Loaded " .. TARGET_SCRIPT)
+
+        local ok, runtimeErr = pcall(chunk)
+        if ok then
+            _lastOKHash = h
+            _lastFailHash = nil
+            Log("OK: " .. TARGET_SCRIPT .. " h=" .. tostring(h))
             return true
         else
             Log("RUNTIME ERROR: " .. tostring(runtimeErr))
+            _lastFailHash = h
+            _lastFailTime = os.clock()
             return false
         end
     end
 
-    -- 4. INITIALIZATION & WATCHER
-    -- Initial Load
     LoadScript()
 
-    -- Background Watcher (Checks every 3 seconds instead of 1.5 to reduce IO stress)
     pcall(function()
         local tk = require("common.time_ticker")
         if tk and tk.AddTimerLoop then
-            tk.AddTimerLoop(0, function()
-                pcall(LoadScript)
-            end, -1, 3.0) -- 3 Second Interval
-            Log("Watcher Active (Interval: 3.0s)")
+            tk.AddTimerLoop(0, function() pcall(LoadScript) end, -1, WATCH_INTERVAL)
         end
     end)
 
-    -- Public API for Debugging
     _G.ROXZ_RELOAD = function()
-        _lastHash = nil -- Force hash mismatch
+        _lastOKHash = nil
+        _lastFailHash = nil
         LoadScript()
     end
-    
     _G.ROXZ_STATUS = function()
-        print("[ROXZ] Timers Tracked: " .. #_G.__ROXZ_TIMERS)
-        print("[ROXZ] Last Hash: " .. tostring(_lastHash))
+        print("[ROXZ] Timers: " .. #_G.__ROXZ_TIMERS .. " OK=" .. tostring(_lastOKHash) .. " Fail=" .. tostring(_lastFailHash))
+    end
+    _G.ROXZ_CLEAR_POPUP_CACHE = function()
+        _popupCache = {}
+        print("[ROXZ] Popup cache cleared")
     end
 
+    Log("--- Loader v5 active ---")
 end)
