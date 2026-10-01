@@ -1,18 +1,13 @@
 -- ===============================================================
--- roxs_v3_min.lua — MINIMAL DIAGNOSTIC
--- Yeh file: sirf batayegi ki load hui ya nahi
--- Log: /sdcard/roxs_v3.log
--- Pehle purani files hata de: roxs.lua, gdump_live.lua, uc_bypass.lua
--- Sirf YEH file mods/ mein rakho
+-- roxs_v4.lua — hooks EVERY protocol handler, no exceptions
+-- Log: /sdcard/roxs_v4.log
 -- ===============================================================
 
-local VERSION = "ROXS_V3_MIN"
-
--- io test — kaunsa path write hota hai
+local VERSION = "ROXS_V4"
 local LOG_PATH = nil
 for _, p in ipairs({
-    "/storage/emulated/0/Android/data/com.pubg.imobile/files/roxs_v3.log",
-    "/sdcard/roxs_v3.log",
+    "/storage/emulated/0/Android/data/com.pubg.imobile/files/roxs_v4.log",
+    "/sdcard/roxs_v4.log",
 }) do
     local ok = pcall(function()
         local f = io.open(p, "a")
@@ -20,7 +15,6 @@ for _, p in ipairs({
     end)
     if ok then LOG_PATH = p; break end
 end
-
 if not LOG_PATH then return end
 
 local function W(msg)
@@ -34,124 +28,107 @@ local function W(msg)
 end
 
 W("=== BOOT " .. os.date() .. " ===")
-print("[" .. VERSION .. "] BOOT")
 
--- Har version ka marker — agar tu v3 dekh raha hai toh file load hui
--- Agar v1 ya v2 dekh raha hai toh purani file abhi bhi chal rahi hai
-W("VERSION_MARKER_12345_UNIQUE")
+-- Hook EVERY protocol handler's send_* and on_*_rsp
+local hookedSend, hookedRsp = 0, 0
+local handlerCount = 0
 
--- StoreHandler load test
-local okSH, SH = pcall(require, "client.network.Protocol.StoreHandler")
-W("SH require ok=" .. tostring(okSH))
-W("SH type=" .. type(SH))
-
-if okSH and SH and type(SH) == "table" then
-    -- list all send_ methods
-    local sends = {}
-    for k, v in pairs(SH) do
-        if type(k) == "string" and k:find("^send_") and type(v) == "function" then
-            sends[#sends+1] = k
-        end
-    end
-    table.sort(sends)
-    W("SH sends count=" .. #sends)
-    for _, s in ipairs(sends) do
-        W("  " .. s)
-    end
-
-    -- hook draw methods
-    local DRAW_METHODS = {
-        "send_do_one_draw_by_activity_req",
-        "send_do_draw_discount_by_activity_req",
-        "send_do_biochemical_activity_one_draw_req",
-        "send_buy_shop_by_id_req",
-        "send_buy_market_by_id_req",
-        "send_get_lucky_draw_unback_activity_req",
-        "send_limited_discount_buy",
-    }
-    for _, m in ipairs(DRAW_METHODS) do
-        if type(SH[m]) == "function" then
-            local orig = SH[m]
-            SH[m] = function(...)
-                local n = select("#", ...)
-                local parts = {}
-                for i = 1, n do parts[i] = tostring(select(i, ...)) end
-                W(">>> CALL " .. m .. " (" .. n .. "): " .. table.concat(parts, " | "))
-                local rok, r1, r2, r3 = pcall(orig, ...)
-                W("<<< RET " .. m .. " ok=" .. tostring(rok) .. " r1=" .. tostring(r1))
-                if rok then return r1, r2, r3 end
-                return r1
+for path, mod in pairs(package.loaded) do
+    if type(path) == "string" and path:find("client.network.Protocol.", 1, true) and type(mod) == "table" then
+        handlerCount = handlerCount + 1
+        for name, fn in pairs(mod) do
+            if type(name) == "string" and type(fn) == "function" then
+                if name:find("^send_") then
+                    local orig = fn
+                    mod[name] = function(...)
+                        local n = select("#", ...)
+                        local parts = {}
+                        for i = 1, n do
+                            local v = select(i, ...)
+                            if type(v) == "table" then
+                                local c = 0
+                                for _ in pairs(v) do c = c + 1 end
+                                parts[i] = "<table:" .. c .. ">"
+                            else
+                                parts[i] = tostring(v)
+                            end
+                        end
+                        W(">>> CALL " .. path .. " :: " .. name .. " (" .. n .. "): " .. table.concat(parts, " | "))
+                        local ok, r1, r2, r3 = pcall(orig, ...)
+                        W("<<< RET " .. name .. " ok=" .. tostring(ok) .. " r=" .. tostring(r1))
+                        if ok then return r1, r2, r3 end
+                        return r1
+                    end
+                    hookedSend = hookedSend + 1
+                elseif name:find("^on_") and name:find("_rsp") then
+                    local orig = fn
+                    mod[name] = function(...)
+                        local n = select("#", ...)
+                        local parts = {}
+                        for i = 1, n do
+                            local v = select(i, ...)
+                            if type(v) == "table" then
+                                local c = 0
+                                for _ in pairs(v) do c = c + 1 end
+                                parts[i] = "<table:" .. c .. ">"
+                            else
+                                parts[i] = tostring(v)
+                            end
+                        end
+                        W(">>> RSP " .. path .. " :: " .. name .. " (" .. n .. "): " .. table.concat(parts, " | "))
+                        return orig(...)
+                    end
+                    hookedRsp = hookedRsp + 1
+                end
             end
-            W("hooked " .. m)
-        else
-            W("NOT FOUND " .. m)
-        end
-    end
-
-    -- hook rsp methods
-    local RSP_METHODS = {
-        "on_do_one_draw_by_activity_rsp",
-        "on_get_lucky_draw_unback_activity_rsp",
-        "on_buy_shop_by_id_rsp",
-    }
-    for _, m in ipairs(RSP_METHODS) do
-        if type(SH[m]) == "function" then
-            local orig = SH[m]
-            SH[m] = function(...)
-                local n = select("#", ...)
-                local parts = {}
-                for i = 1, n do parts[i] = tostring(select(i, ...)) end
-                W(">>> RSP " .. m .. " (" .. n .. "): " .. table.concat(parts, " | "))
-                return orig(...)
-            end
-            W("hooked rsp " .. m)
         end
     end
 end
 
--- UC bypass — tight pcalls
+W("handlers=" .. handlerCount .. " sends_hooked=" .. hookedSend .. " rsps_hooked=" .. hookedRsp)
+
+-- UC bypass
 local FAKE = 999999999
 local dMgr = _G.DataMgr
-W("dMgr=" .. tostring(dMgr))
 if dMgr then
-    pcall(function() dMgr.uc = FAKE end)
-    pcall(function() dMgr.UC = FAKE end)
-    pcall(function() dMgr.ticket = FAKE end)
+    pcall(function() dMgr.uc = FAKE; dMgr.UC = FAKE; dMgr.ticket = FAKE end)
     pcall(function() dMgr.GetUC = function() return FAKE end end)
     pcall(function() dMgr.CheckUC = function() return true end end)
     pcall(function() dMgr.CheckIsEnough = function() return true end end)
-    W("UC patched dMgr.uc=" .. tostring(dMgr.uc))
-else
-    W("dMgr NOT FOUND")
+    W("UC patched")
 end
 
--- Luckyback module price getters -> 0
-local lb_ok, lb = pcall(require, "client.slua.logic.lobby_activity.logic_luckyback_activity")
-W("luckyback ok=" .. tostring(lb_ok))
-if lb_ok and lb then
-    pcall(function() lb.GetOneDrawDiscountPrice = function() return 0 end end)
-    pcall(function() if lb.GetTenDrawDiscountPrice then lb.GetTenDrawDiscountPrice = function() return 0 end end end)
-    pcall(function() if lb.HasEnoughUC then lb.HasEnoughUC = function() return true end end end)
-    W("luckyback patched")
+-- Luckyback + unback price = 0
+for _, p in ipairs({
+    "client.slua.logic.lobby_activity.logic_luckyback_activity",
+    "client.slua.logic.lobby_activity.logic_luckyunback_activity",
+}) do
+    local ok, m = pcall(require, p)
+    if ok and m then
+        pcall(function() m.GetOneDrawDiscountPrice = function() return 0 end end)
+        pcall(function() m.GetTenDrawDiscountPrice = function() return 0 end end)
+        pcall(function() m.HasEnoughUC = function() return true end end)
+        pcall(function() m.GetNextDrawCost = function() return 0 end end)
+    end
 end
+W("activity prices patched")
 
 -- Heartbeat
 local t_ok, ticker = pcall(require, "common.time_ticker")
-W("ticker ok=" .. tostring(t_ok))
 if t_ok and ticker and ticker.AddTimerLoop then
     local tick = 0
     ticker.AddTimerLoop(0, function()
         pcall(function()
             tick = tick + 1
-            if tick % 10 == 0 then
-                W("ALIVE tick=" .. tick .. " dMgr.uc=" .. tostring(dMgr and dMgr.uc))
+            if tick % 20 == 0 then
+                if dMgr then pcall(function() dMgr.uc = FAKE end) end
+                W("alive tick=" .. tick)
             end
         end)
     end, -1, 0.5)
-    W("timer loop started")
+    W("ticker started")
 else
     W("NO TICKER")
 end
 
 W("=== READY ===")
-print("[" .. VERSION .. "] READY")
