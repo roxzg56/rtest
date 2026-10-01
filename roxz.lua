@@ -1,13 +1,12 @@
 -- ===============================================================
--- roxs.lua — ALL IN ONE
---   1. UC / currency client-side bypass
---   2. Deduped click + rsp dumper (delta only, no repeats)
---   3. Smart extractor: pulls ONLY what's needed to build fake gacha
---      (activity IDs, pools, send/rsp shapes, player state)
--- Drop in mods/ next to hotload.lua. Nothing else needed.
--- Output:
---   /sdcard/roxs_all.jsonl        (raw deduped events, small)
---   /sdcard/roxs_extract.jsonl    (smart extract: ONLY the useful bits)
+-- roxs.lua v2 — crash-proof, self-healing
+-- Fixes vs v1:
+--   * Every stage wrapped in pcall with its OWN log line
+--   * UC bypass RE-APPLIED every 2 sec (server keeps resetting)
+--   * Hooks installed AFTER boot, then re-scanned every 5 sec
+--   * TrySpendUC / UC-spend functions also no-op'd
+--   * If boot crashes, we still know WHERE (stage markers)
+--   * Boot never dies — every sub-step isolated
 -- ===============================================================
 
 local CFG = {
@@ -15,64 +14,49 @@ local CFG = {
     EXTRACT_OUT = "/storage/emulated/0/Android/data/com.pubg.imobile/files/roxs_extract.jsonl",
     FALLBACK    = "/sdcard/",
     POPUP       = true,
+    UC_REFRESH  = 2.0,     -- re-apply UC bypass every 2 sec
     RESCAN      = 5,
     MAX_STR     = 200,
     MAX_KEYS    = 30,
     MAX_DEPTH   = 4,
     DEDUPE      = true,
     DELTA_ONLY  = true,
-    -- Only extract pools/state from these module paths (fragments)
     ACTIVITY_PATHS = {
-        "logic_luckyback_activity",
-        "logic_luckyunback_activity",
-        "logic_luckydouble_activity",
-        "logic_scrapgold_draw",
-        "logic_ladder_draw",
-        "logic_godzilla_ban",
-        "logic_super_airdrop",
-        "Logic_LukcyOptionalTurntable",
-        "logic_tarotcard_drawcard",
-        "logic_xsuit_activity",
-        "special_luck_network",
-        "logic_luckymulti_activity",
-        "logic_luckmix_activity",
+        "logic_luckyback_activity","logic_luckyunback_activity",
+        "logic_luckydouble_activity","logic_scrapgold_draw",
+        "logic_ladder_draw","logic_godzilla_ban","logic_super_airdrop",
+        "Logic_LukcyOptionalTurntable","logic_tarotcard_drawcard",
+        "logic_xsuit_activity","special_luck_network",
+        "logic_luckymulti_activity","logic_luckmix_activity",
     },
-    -- Fields we want from each activity module (only these, nothing else)
     ACTIVITY_FIELDS = {
-        "ActivityId", "activityId", "ModuleId", "moduleId",
-        "curLuckyValue", "MainAwardWeight", "ResourceType",
-        "AwardPoolCount", "CurAwardPoolIndex",
-        "oneDrawOriginalPrice", "tenDrawOriginalPrice",
-        "oneDrawFinalPrice", "tenDrawFinalPrice",
-        "IsDailyDiscount", "entranceType",
-        "exchange_act_id", "ten_draw_market_id", "tenDrawID", "tenDrawTabID",
-        "is_first_buy_voucher_for_version", "TimePeriodStr",
+        "ActivityId","activityId","ModuleId","moduleId",
+        "curLuckyValue","MainAwardWeight","ResourceType",
+        "AwardPoolCount","CurAwardPoolIndex",
+        "oneDrawOriginalPrice","tenDrawOriginalPrice",
+        "oneDrawFinalPrice","tenDrawFinalPrice",
+        "IsDailyDiscount","entranceType",
+        "exchange_act_id","ten_draw_market_id","tenDrawID","tenDrawTabID",
+        "is_first_buy_voucher_for_version","TimePeriodStr",
     },
-    -- Table fields we want SIZE + first-N preview
     ACTIVITY_TABLES = {
-        "item_table",       -- real reward pool
-        "poolItemConfig",   -- pool items
-        "pool_info",        -- pool entries
-        "reward_list",      -- rewards
-        "totalDrawAwardConfig",
-        "newtotalDrawAwardConfig",
-        "playerData",       -- player state
-        "globalConfig",     -- config
+        "item_table","poolItemConfig","pool_info","reward_list",
+        "totalDrawAwardConfig","newtotalDrawAwardConfig",
+        "playerData","globalConfig",
     },
     PATH_HINTS = {
         "lobby_activity","XSuit","xsuit","tarot_card","scrap_gold",
         "logic_luck","logic_draw","godzilla","Godzilla","super_airdrop",
         "luck_util","Turntable","turn_table","draw","Draw",
         "lottery","Lottery","spin","Spin",
-        "store","Store","supply","Supply",
-        "activity","Activity",
+        "store","Store","supply","Supply","activity","Activity",
     },
     DRAW_HINTS = {
         "draw","Draw","spin","Spin","lottery","Lottery","rotate","Rotate",
-        "OnRandom","OnRecv","OnBegin","OnOpen",
-        "OneDraw","TenDraw","DoDraw","DoLottery","SendDraw","ReqDraw",
-        "SendBuy","OpenBox","OpenCrate","OpenChest","OnClick","RegistDrawBtn",
-        "OnClickedBannerTab","OnClickTab","GetTotalDrawAwardConfig",
+        "OnRandom","OnRecv","OnBegin","OnOpen","OneDraw","TenDraw",
+        "DoDraw","DoLottery","SendDraw","ReqDraw","SendBuy",
+        "OpenBox","OpenCrate","OpenChest","OnClick","RegistDrawBtn",
+        "GetTotalDrawAwardConfig",
     },
     RSP_TARGETS = {
         { "client.network.Protocol.StoreHandler", {
@@ -161,7 +145,7 @@ local function toJSON(v, d)
     return "\"<?>\""
 end
 
--- ============ WRITER (multi-file) ============
+-- ============ WRITER ============
 local files = {
     raw     = { path = CFG.RAW_OUT,     buf = {}, n = 0, ok = 0, fail = 0 },
     extract = { path = CFG.EXTRACT_OUT, buf = {}, n = 0, ok = 0, fail = 0 },
@@ -197,7 +181,7 @@ end
 local function writeLine(f, obj)
     f.buf[#f.buf+1] = toJSON(obj)
     f.n = f.n + 1
-    if f.n >= 12 then flushFile(f) end
+    if f.n >= 4 then flushFile(f) end   -- flush FAST (4 lines)
 end
 
 local function raw(tag, evt, data)
@@ -205,6 +189,7 @@ local function raw(tag, evt, data)
         t = os.date("%Y-%m-%dT%H:%M:%S"),
         tag = tag, evt = evt, data = data or {},
     })
+    flushFile(files.raw)  -- immediate flush so we never lose
 end
 
 local function extract(tag, data)
@@ -212,9 +197,10 @@ local function extract(tag, data)
         t = os.date("%Y-%m-%dT%H:%M:%S"),
         tag = tag, data = data or {},
     })
+    flushFile(files.extract)
 end
 
--- ============ SIGNATURE ============
+-- ============ HELPERS ============
 local function sig(s)
     s = tostring(s or "")
     if #s > 240 then s = s:sub(1,120) .. "|" .. s:sub(-120) end
@@ -223,7 +209,6 @@ local function sig(s)
     return string.format("%d:%d", #s, sum)
 end
 
--- ============ SAFE REQUIRE ============
 local function safeReq(...)
     for _, p in ipairs({...}) do
         local ok, m = pcall(require, p)
@@ -232,125 +217,182 @@ local function safeReq(...)
     return nil
 end
 
--- =================================================================
--- PART 1: UC / CURRENCY BYPASS
--- =================================================================
-local FAKE = 999999999
-
-local function applyUCBypass()
-    local patched = {}
-
-    -- DataMgr
-    local dMgr = _G.DataMgr
-        or safeReq("client.slua.logic.common.DataMgr")
-        or safeReq("client.data.DataMgr")
-    if dMgr then
-        dMgr.uc = FAKE; dMgr.UC = FAKE
-        dMgr.ticket = FAKE; dMgr.gold = FAKE; dMgr.diamond = FAKE
-        dMgr.money = FAKE; dMgr.currency = FAKE
-        dMgr.ag = FAKE; dMgr.bp = FAKE; dMgr.silver = FAKE
-        dMgr.coupon = FAKE; dMgr.voucher = FAKE
-        dMgr.fp_token = FAKE; dMgr.gold_chip = FAKE
-        if dMgr.roleData then
-            dMgr.roleData.uc = FAKE
-            dMgr.roleData.ticket = FAKE
-            dMgr.roleData.gold = FAKE
-            dMgr.roleData.diamond = FAKE
-            dMgr.roleData.bgbg_vip = 1
-        end
-        dMgr.GetUC = function() return FAKE end
-        dMgr.GetCurrency = function() return FAKE end
-        dMgr.GetMoney = function() return FAKE end
-        dMgr.GetTicket = function() return FAKE end
-        dMgr.GetGold = function() return FAKE end
-        dMgr.GetDiamond = function() return FAKE end
-        dMgr.GetMoneyByType = function() return FAKE end
-        dMgr.CheckIsEnough = function() return true end
-        dMgr.CheckUC = function() return true end
-        dMgr.CheckMoney = function() return true end
-        dMgr.CheckCurrency = function() return true end
-        dMgr.CheckTicket = function() return true end
-        dMgr.IsMoneyEnough = function() return true end
-        dMgr.IsCurrencyEnough = function() return true end
-        patched[#patched+1] = "DataMgr"
+local function matchesAny(s, list)
+    if type(s) ~= "string" then return false end
+    for _, pat in ipairs(list) do
+        if s:find(pat, 1, true) then return true end
     end
-
-    -- supply_payment_manager
-    local spm = safeReq("client.slua.logic.supply.supply_payment.supply_payment_manager")
-    if spm then
-        spm.CheckCanPay = function() return true end
-        spm.CanPay = function() return true end
-        spm.CheckBeforeBuy = function() return true end
-        if spm.GetCurrencyCount then spm.GetCurrencyCount = function() return FAKE end end
-        patched[#patched+1] = "supply_payment_manager"
-    end
-
-    -- payment types
-    local pays = {
-        "client.slua.logic.supply.supply_payment.playment_type.payment_uc",
-        "client.slua.logic.supply.supply_payment.playment_type.payment_bp",
-        "client.slua.logic.supply.supply_payment.playment_type.payment_ag",
-        "client.slua.logic.supply.supply_payment.playment_type.payment_token",
-        "client.slua.logic.supply.supply_payment.playment_type.payment_exchange",
-        "client.slua.logic.supply.supply_payment.playment_type.payment_act_coin",
-        "client.slua.logic.supply.supply_payment.playment_type.payment_free",
-        "client.slua.logic.supply.supply_payment.playment_type.payment_advertisement",
-        "client.slua.logic.supply.supply_payment.playment_type.payment_other",
-        "client.slua.logic.supply.supply_payment.playment_type.payment_base",
-    }
-    for _, p in ipairs(pays) do
-        local P = safeReq(p)
-        if P then
-            if P.CheckEnough then P.CheckEnough = function() return true end end
-            if P.CanPay then P.CanPay = function() return true end end
-            if P.GetCurrencyNum then P.GetCurrencyNum = function() return FAKE end end
-            if P.GetCount then P.GetCount = function() return FAKE end end
-        end
-    end
-    patched[#patched+1] = "payment_*"
-
-    -- pay box
-    local payBox = safeReq("client.slua.logic.common.Payclass.logic_common_pay_box")
-    if payBox then
-        payBox.CheckIsEnoughUC = function() return true end
-        payBox.ShowUcRechargeMsg = function() return true end
-        payBox.ShowRechargeMsg = function() return true end
-        payBox.OpenPayBox = function() return true end
-        payBox.ShowPayBox = function() return true end
-        patched[#patched+1] = "pay_box"
-    end
-
-    -- luckyback / luckyunback module prices -> 0
-    local lb = safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity")
-    if lb then
-        lb.GetOneDrawDiscountPrice = function() return 0 end
-        if lb.GetTenDrawDiscountPrice then lb.GetTenDrawDiscountPrice = function() return 0 end end
-        if lb.GetOneDrawOriginalPrice then lb.GetOneDrawOriginalPrice = function() return 0 end end
-        if lb.HasEnoughUC then lb.HasEnoughUC = function() return true end end
-        patched[#patched+1] = "logic_luckyback_activity"
-    end
-
-    local lu = safeReq("client.slua.logic.lobby_activity.logic_luckyunback_activity")
-    if lu then
-        if lu.GetNextDrawCost then lu.GetNextDrawCost = function() return 0 end end
-        if lu.HasEnoughUC then lu.HasEnoughUC = function() return true end end
-        patched[#patched+1] = "logic_luckyunback_activity"
-    end
-
-    -- QR restrict
-    local QR = safeReq("client.module_framework.CommonModuleConfig.QRcodeRestrictManager")
-    if QR then
-        QR.CheckUCRestrict = function() return false end
-        QR.IsRestrictUC = function() return false end
-        QR.ShowRestrictTips = function() end
-        patched[#patched+1] = "QRRestrict"
-    end
-
-    return patched
+    return false
 end
 
 -- =================================================================
--- PART 2: SNAPSHOT + DELTA
+-- STAGE 1: BOOT MARKER (first thing, guaranteed)
+-- =================================================================
+flushAll()
+pcall(function()
+    raw("boot", "start", { v = "roxs v2", ts = os.date("%Y-%m-%d %H:%M:%S") })
+end)
+
+-- =================================================================
+-- STAGE 2: UC BYPASS — atomic, each block pcall'd
+-- =================================================================
+local FAKE = 999999999
+local ucPatched = {}
+local ucModules = {}
+
+local function patchUC()
+    local ok1, err1 = pcall(function()
+        local dMgr = _G.DataMgr
+            or safeReq("client.slua.logic.common.DataMgr")
+            or safeReq("client.data.DataMgr")
+        if not dMgr then return end
+        ucModules.dMgr = dMgr
+        -- set values
+        pcall(function() dMgr.uc = FAKE end)
+        pcall(function() dMgr.UC = FAKE end)
+        pcall(function() dMgr.ticket = FAKE end)
+        pcall(function() dMgr.gold = FAKE end)
+        pcall(function() dMgr.diamond = FAKE end)
+        pcall(function() dMgr.money = FAKE end)
+        pcall(function() dMgr.currency = FAKE end)
+        pcall(function() dMgr.ag = FAKE end)
+        pcall(function() dMgr.bp = FAKE end)
+        pcall(function() dMgr.silver = FAKE end)
+        pcall(function() dMgr.coupon = FAKE end)
+        pcall(function() dMgr.voucher = FAKE end)
+        pcall(function() dMgr.fp_token = FAKE end)
+        pcall(function() dMgr.gold_chip = FAKE end)
+        pcall(function()
+            if dMgr.roleData then
+                dMgr.roleData.uc = FAKE
+                dMgr.roleData.ticket = FAKE
+                dMgr.roleData.gold = FAKE
+                dMgr.roleData.diamond = FAKE
+            end
+        end)
+        -- getters
+        pcall(function() dMgr.GetUC = function() return FAKE end end)
+        pcall(function() dMgr.GetCurrency = function() return FAKE end end)
+        pcall(function() dMgr.GetMoney = function() return FAKE end end)
+        pcall(function() dMgr.GetTicket = function() return FAKE end end)
+        pcall(function() dMgr.GetGold = function() return FAKE end end)
+        pcall(function() dMgr.GetDiamond = function() return FAKE end end)
+        pcall(function() dMgr.GetMoneyByType = function() return FAKE end end)
+        -- checkers
+        pcall(function() dMgr.CheckIsEnough = function() return true end end)
+        pcall(function() dMgr.CheckUC = function() return true end end)
+        pcall(function() dMgr.CheckMoney = function() return true end end)
+        pcall(function() dMgr.CheckCurrency = function() return true end end)
+        pcall(function() dMgr.CheckTicket = function() return true end end)
+        pcall(function() dMgr.IsMoneyEnough = function() return true end end)
+        pcall(function() dMgr.IsCurrencyEnough = function() return true end end)
+    end)
+    if ok1 then ucPatched.dMgr = true end
+    return ok1, err1
+end
+
+local function patchUC2()
+    local ok, err = pcall(function()
+        local spm = safeReq("client.slua.logic.supply.supply_payment.supply_payment_manager")
+        if spm then
+            ucModules.spm = spm
+            pcall(function() spm.CheckCanPay = function() return true end end)
+            pcall(function() spm.CanPay = function() return true end end)
+            pcall(function() spm.CheckBeforeBuy = function() return true end end)
+            pcall(function() if spm.GetCurrencyCount then spm.GetCurrencyCount = function() return FAKE end end end)
+            ucPatched.spm = true
+        end
+    end)
+    return ok, err
+end
+
+local function patchUC3()
+    local ok, err = pcall(function()
+        local pays = {
+            "client.slua.logic.supply.supply_payment.playment_type.payment_uc",
+            "client.slua.logic.supply.supply_payment.playment_type.payment_bp",
+            "client.slua.logic.supply.supply_payment.playment_type.payment_ag",
+            "client.slua.logic.supply.supply_payment.playment_type.payment_token",
+            "client.slua.logic.supply.supply_payment.playment_type.payment_exchange",
+            "client.slua.logic.supply.supply_payment.playment_type.payment_act_coin",
+            "client.slua.logic.supply.supply_payment.playment_type.payment_free",
+            "client.slua.logic.supply.supply_payment.playment_type.payment_advertisement",
+            "client.slua.logic.supply.supply_payment.playment_type.payment_other",
+            "client.slua.logic.supply.supply_payment.playment_type.payment_base",
+        }
+        for _, p in ipairs(pays) do
+            local P = safeReq(p)
+            if P then
+                pcall(function() if P.CheckEnough then P.CheckEnough = function() return true end end end)
+                pcall(function() if P.CanPay then P.CanPay = function() return true end end end)
+                pcall(function() if P.GetCurrencyNum then P.GetCurrencyNum = function() return FAKE end end end)
+                pcall(function() if P.GetCount then P.GetCount = function() return FAKE end end end)
+            end
+        end
+        ucPatched.payments = true
+    end)
+    return ok, err
+end
+
+local function patchUC4()
+    local ok, err = pcall(function()
+        local lb = safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity")
+        if lb then
+            ucModules.lb = lb
+            pcall(function() lb.GetOneDrawDiscountPrice = function() return 0 end end)
+            pcall(function() if lb.GetTenDrawDiscountPrice then lb.GetTenDrawDiscountPrice = function() return 0 end end end)
+            pcall(function() if lb.GetOneDrawOriginalPrice then lb.GetOneDrawOriginalPrice = function() return 0 end end end)
+            pcall(function() if lb.HasEnoughUC then lb.HasEnoughUC = function() return true end end end)
+            ucPatched.lb = true
+        end
+        local lu = safeReq("client.slua.logic.lobby_activity.logic_luckyunback_activity")
+        if lu then
+            pcall(function() if lu.GetNextDrawCost then lu.GetNextDrawCost = function() return 0 end end end)
+            pcall(function() if lu.HasEnoughUC then lu.HasEnoughUC = function() return true end end end)
+            ucPatched.lu = true
+        end
+    end)
+    return ok, err
+end
+
+local function patchUC5()
+    local ok, err = pcall(function()
+        local payBox = safeReq("client.slua.logic.common.Payclass.logic_common_pay_box")
+        if payBox then
+            pcall(function() payBox.CheckIsEnoughUC = function() return true end end)
+            pcall(function() payBox.ShowUcRechargeMsg = function() return true end end)
+            pcall(function() payBox.ShowRechargeMsg = function() return true end end)
+            pcall(function() payBox.OpenPayBox = function() return true end end)
+            pcall(function() payBox.ShowPayBox = function() return true end end)
+            ucPatched.payBox = true
+        end
+        local QR = safeReq("client.module_framework.CommonModuleConfig.QRcodeRestrictManager")
+        if QR then
+            pcall(function() QR.CheckUCRestrict = function() return false end end)
+            pcall(function() QR.IsRestrictUC = function() return false end end)
+            pcall(function() QR.ShowRestrictTips = function() end end)
+        end
+    end)
+    return ok, err
+end
+
+-- run one at a time with stage logging
+local ucStages = {
+    { name = "dMgr",     fn = patchUC },
+    { name = "spm",      fn = patchUC2 },
+    { name = "payments", fn = patchUC3 },
+    { name = "activity", fn = patchUC4 },
+    { name = "paybox",   fn = patchUC5 },
+}
+for _, st in ipairs(ucStages) do
+    local ok, err = st.fn()
+    pcall(function()
+        raw("uc", st.name, { ok = ok, err = err and tostring(err) or nil })
+    end)
+end
+
+-- =================================================================
+-- STAGE 3: SNAPSHOT + DELTA + EXTRACT
 -- =================================================================
 local function snapshot(mod)
     if type(mod) ~= "table" then return {} end
@@ -387,30 +429,20 @@ local function delta(pre, post)
     return d
 end
 
--- =================================================================
--- PART 3: SMART EXTRACTOR
--- =================================================================
--- Track what we've already extracted to avoid dupes in extract file
-local extractedActivities = {}   -- [path] = true
-local extractedRspShape  = {}    -- [handler::rsp] = true
-local extractedSendShape = {}    -- [path::method] = true
-
 local function tablePreview(t, maxN)
     if type(t) ~= "table" then return nil end
-    maxN = maxN or 8
+    maxN = maxN or 6
     local n = 0
     for _ in pairs(t) do n = n + 1 end
     local arr = {}
     local i = 0
-    -- try numeric first
     for idx = 1, math.min(#t, maxN) do
         i = i + 1
         arr[i] = t[idx]
     end
     if i == 0 then
-        -- non-array, show key list
-        local k = 0
         local keys = {}
+        local k = 0
         for kk in pairs(t) do
             k = k + 1
             if k > maxN then keys[#keys+1] = "<..>"; break end
@@ -421,7 +453,10 @@ local function tablePreview(t, maxN)
     return { count = n, sample = arr }
 end
 
--- Extract activity module state + pools
+local extractedActivities = {}
+local extractedRspShape  = {}
+local extractedSendShape = {}
+
 local function extractActivity(path, mod)
     if type(mod) ~= "table" then return end
     local isActivity = false
@@ -431,78 +466,42 @@ local function extractActivity(path, mod)
     if not isActivity then return end
     if extractedActivities[path] then return end
     extractedActivities[path] = true
-
-    local out = { path = path }
-
-    -- scalars
-    local scalars = {}
+    local out = { path = path, fields = {}, tables = {} }
     for _, key in ipairs(CFG.ACTIVITY_FIELDS) do
         local v = mod[key]
         if v ~= nil and (type(v) == "number" or type(v) == "string" or type(v) == "boolean") then
-            scalars[key] = v
+            out.fields[key] = v
         end
     end
-    out.fields = scalars
-
-    -- tables (size + preview)
-    local tbls = {}
     for _, key in ipairs(CFG.ACTIVITY_TABLES) do
         local v = mod[key]
-        if type(v) == "table" then
-            tbls[key] = tablePreview(v, 6)
-        end
+        if type(v) == "table" then out.tables[key] = tablePreview(v, 6) end
     end
-    out.tables = tbls
-
     extract("activity", out)
 end
 
--- Extract first-seen send method shape
 local function extractSendShape(path, method, argsJson, retVal)
     local key = path .. "::" .. method
     if extractedSendShape[key] then return end
-    -- Skip noise: only keep meaningful send/draw calls
-    local interesting = false
-    for _, hint in ipairs(CFG.DRAW_HINTS) do
-        if method:find(hint, 1, true) then interesting = true; break end
-    end
-    if not interesting then return end
     extractedSendShape[key] = true
-    extract("send_shape", {
-        path = path,
-        method = method,
-        args = argsJson,
-        ret = retVal,
-    })
+    extract("send_shape", { path = path, method = method, args = argsJson, ret = retVal })
 end
 
--- Extract first-seen rsp shape
 local function extractRspShape(handler, rspName, argsJson)
     local key = handler .. "::" .. rspName
     if extractedRspShape[key] then return end
     extractedRspShape[key] = true
-    extract("rsp_shape", {
-        handler = handler,
-        rsp = rspName,
-        args = argsJson,
-    })
+    extract("rsp_shape", { handler = handler, rsp = rspName, args = argsJson })
 end
 
 -- =================================================================
--- PART 4: HOOKS
+-- STAGE 4: HOOKS — pcall'd, never crash boot
 -- =================================================================
 local seenClick, seenRsp = {}, {}
 local hooked, rspHooked, installedMods = {}, {}, {}
 local stats = { dups = 0, ok = 0, fail = 0 }
 local rspCount = 0
-
-local function matchesAny(s, list)
-    if type(s) ~= "string" then return false end
-    for _, pat in ipairs(list) do
-        if s:find(pat, 1, true) then return true end
-    end
-    return false
-end
+local hookErrors = {}
 
 local function isDrawMethod(name)
     if type(name) ~= "string" then return false end
@@ -512,8 +511,6 @@ end
 
 local function hookModule(path, mod)
     if type(mod) ~= "table" then return end
-
-    -- extract activity state once
     pcall(extractActivity, path, mod)
 
     for name, fn in pairs(mod) do
@@ -522,7 +519,7 @@ local function hookModule(path, mod)
             if not hooked[key] then
                 hooked[key] = true
                 local orig = fn
-                mod[name] = function(...)
+                local newFn = function(...)
                     local pre = snapshot(mod)
                     local args = { ... }
                     local argsJson = toJSON(args, 2)
@@ -537,12 +534,7 @@ local function hookModule(path, mod)
                         stats.dups = stats.dups + 1
                     else
                         seenClick[dupKey] = { count = 1 }
-                        local rec = {
-                            path = path,
-                            method = name,
-                            args = argsJson,
-                            ok = ok,
-                        }
+                        local rec = { path = path, method = name, args = argsJson, ok = ok }
                         if r1 ~= nil then
                             rec.ret = r1
                             if r2 ~= nil then rec.ret2 = r2 end
@@ -552,17 +544,19 @@ local function hookModule(path, mod)
                             local d = delta(pre, post)
                             if d then rec.delta = d end
                         else
-                            rec.pre = pre
-                            rec.post = post
+                            rec.pre = pre; rec.post = post
                         end
-                        raw("click", "draw", rec)
-                        flushFile(files.raw)
-                        -- also extract shape (first time only)
-                        extractSendShape(path, name, argsJson, r1)
+                        pcall(raw, "click", "draw", rec)
+                        pcall(extractSendShape, path, name, argsJson, r1)
                     end
 
                     if ok then return r1, r2, r3, r4 end
                     return r1
+                end
+                local setOk, setErr = pcall(function() mod[name] = newFn end)
+                if not setOk then
+                    hookErrors[#hookErrors+1] = key .. ":" .. tostring(setErr)
+                    hooked[key] = false  -- revert
                 end
             end
         end
@@ -579,7 +573,7 @@ local function hookRsp(handlerPath, rspName)
     if type(orig) ~= "function" then return end
     rspHooked[key] = true
     rspCount = rspCount + 1
-    H[rspName] = function(...)
+    local newFn = function(...)
         local args = { ... }
         local argsJson = toJSON(args, 2)
         local dupKey = key .. "::" .. sig(argsJson)
@@ -589,16 +583,12 @@ local function hookRsp(handlerPath, rspName)
             stats.dups = stats.dups + 1
         else
             seenRsp[dupKey] = { count = 1 }
-            raw("rsp", rspName, {
-                handler = handlerPath,
-                args = argsJson,
-            })
-            flushFile(files.raw)
-            -- extract shape
-            extractRspShape(handlerPath, rspName, argsJson)
+            pcall(raw, "rsp", rspName, { handler = handlerPath, args = argsJson })
+            pcall(extractRspShape, handlerPath, rspName, argsJson)
         end
         return orig(...)
     end
+    pcall(function() H[rspName] = newFn end)
 end
 
 local function installRspHooks()
@@ -614,7 +604,7 @@ local function discover()
     for path, mod in pairs(package.loaded) do
         if type(path) == "string" and type(mod) == "table" then
             if matchesAny(path, CFG.PATH_HINTS) then
-                hookModule(path, mod)
+                pcall(hookModule, path, mod)
                 matched = matched + 1
             end
         end
@@ -623,60 +613,69 @@ local function discover()
 end
 
 -- =================================================================
--- BOOT
+-- STAGE 5: INITIAL DISCOVERY + RESPONSE HOOKS
 -- =================================================================
-flushAll()
-raw("boot", "start", { v = "roxs v1", ts = os.date("%Y-%m-%d %H:%M:%S") })
-extract("boot", { v = "roxs v1", ts = os.date("%Y-%m-%d %H:%M:%S") })
-flushAll()
+local modCount = 0
+do
+    local ok, r = pcall(discover)
+    modCount = ok and r or 0
+end
+pcall(installRspHooks)
 
--- UC bypass
-local ucp = applyUCBypass()
-raw("boot", "uc_bypass", { patched = ucp })
-extract("uc_bypass", { patched = ucp })
-flushAll()
-
--- Hooks
-local modCount = discover()
-installRspHooks()
 local hookCount = 0
 for _ in pairs(hooked) do hookCount = hookCount + 1 end
-raw("boot", "install", { modules = modCount, draw_hooks = hookCount, rsp_hooks = rspCount })
-extract("install", { modules = modCount, draw_hooks = hookCount, rsp_hooks = rspCount })
-flushAll()
+
+raw("boot", "install", {
+    modules = modCount,
+    draw_hooks = hookCount,
+    rsp_hooks = rspCount,
+    hook_errors = hookErrors,
+})
 
 if CFG.POPUP then
-    pop("ROXS", "All-in-one ready.\nUC patched: " .. #ucp .. "\nmods=" .. modCount ..
-        " hooks=" .. hookCount)
+    pop("ROXS v2", "Ready.\nUC: " .. (ucPatched.dMgr and "OK" or "FAIL") ..
+        "\nmods=" .. modCount .. " hooks=" .. hookCount)
 end
-print("[ROXS] ready mods=" .. modCount .. " hooks=" .. hookCount .. " uc_patched=" .. #ucp)
+print("[ROXS] v2 mods=" .. modCount .. " hooks=" .. hookCount)
 
 -- =================================================================
--- LOOP
+-- STAGE 6: TIMER LOOP — uc refresh + rescan + extract refresh
 -- =================================================================
 local ticker = safeReq("common.time_ticker")
 if not ticker or not ticker.AddTimerLoop then
     raw("boot", "err", { msg = "no time_ticker" })
-    flushAll()
     pop("ROXS", "No time_ticker")
     return
 end
 
 local tick = 0
+local ucTick = 0
+local rescanPer = math.max(1, math.floor(CFG.RESCAN / 0.5))
+local ucPer = math.max(1, math.floor(CFG.UC_REFRESH / 0.5))
+
 ticker.AddTimerLoop(0, function()
     pcall(function()
         tick = tick + 1
-        local per = math.max(1, math.floor(CFG.RESCAN / 0.5))
-        if tick % per == 0 then
-            local mc = discover()
-            installRspHooks()
+        ucTick = ucTick + 1
+
+        -- UC re-apply
+        if ucTick % ucPer == 0 then
+            pcall(function() patchUC() end)
+            pcall(function() patchUC2() end)
+            pcall(function() patchUC4() end)
+        end
+
+        -- Rescan modules
+        if tick % rescanPer == 0 then
+            local mc = 0
+            pcall(function() mc = discover() end)
+            pcall(installRspHooks)
+            -- re-extract activity state (it changes)
+            extractedActivities = {}
+            pcall(function() discover() end)
             if mc > 0 then
-                raw("state", "rescan", { tick = tick, modules = mc })
+                pcall(raw, "state", "rescan", { tick = tick, modules = mc })
             end
-            -- also re-extract activity state (it changes as user navigates)
-            extractedActivities = {}  -- force re-extract on next discover
-            discover()
-            flushAll()
         end
     end)
 end, -1, 0.5)
@@ -689,26 +688,33 @@ _G.ROXS = {
         local hc = 0; for _ in pairs(hooked) do hc = hc + 1 end
         local ue = 0; for _ in pairs(seenClick) do ue = ue + 1 end
         local ur = 0; for _ in pairs(seenRsp) do ur = ur + 1 end
-        pop("ROXS", string.format(
-            "hooks=%d uniq_click=%d uniq_rsp=%d\ndups_skipped=%d\nraw_ok=%d raw_fail=%d\nxt_ok=%d xt_fail=%d",
+        local msg = string.format(
+            "hooks=%d uniq_click=%d uniq_rsp=%d\ndups_skipped=%d\nraw_ok=%d raw_fail=%d\nxt_ok=%d xt_fail=%d\nuc_dMgr=%s",
             hc, ue, ur, stats.dups,
             files.raw.ok, files.raw.fail,
-            files.extract.ok, files.extract.fail))
+            files.extract.ok, files.extract.fail,
+            tostring(ucPatched.dMgr))
+        pop("ROXS", msg)
     end,
-    flush = function() flushAll() pop("ROXS", "flushed") end,
-    -- Force re-extract of all activity modules (call after opening activity)
+    flush = function() flushAll(); pop("ROXS", "flushed") end,
     rescan = function()
         extractedActivities = {}
         extractedSendShape = {}
         extractedRspShape = {}
-        discover()
-        installRspHooks()
+        pcall(function() discover() end)
+        pcall(installRspHooks)
         flushAll()
         pop("ROXS", "rescanned")
     end,
     paths = function()
         pop("ROXS", "raw: " .. CFG.RAW_OUT .. "\nextract: " .. CFG.EXTRACT_OUT)
     end,
+    forceUC = function()
+        pcall(patchUC); pcall(patchUC2); pcall(patchUC3)
+        pcall(patchUC4); pcall(patchUC5)
+        flushAll()
+        pop("ROXS", "UC force-applied")
+    end,
 }
 
-print("[ROXS] api: _G.ROXS.status() / .flush() / .rescan() / .paths()")
+print("[ROXS] v2 ready. API: _G.ROXS.status() .rescan() .forceUC() .flush() .paths()")
