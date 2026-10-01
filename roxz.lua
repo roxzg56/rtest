@@ -1,134 +1,222 @@
 -- ===============================================================
--- roxs_v4.lua — hooks EVERY protocol handler, no exceptions
--- Log: /sdcard/roxs_v4.log
+-- fake_gacha.lua — REAL working gacha mod
+-- Hooks LuckybackHandler.send_do_one_draw_back_by_activity_req
+-- No network. No UC. Locally picks from real pool and fakes RSP.
+-- Drop in mods/ next to roxs_v4.lua (or replace it entirely).
+-- Log: /sdcard/fake_gacha.log
 -- ===============================================================
 
-local VERSION = "ROXS_V4"
-local LOG_PATH = nil
-for _, p in ipairs({
-    "/storage/emulated/0/Android/data/com.pubg.imobile/files/roxs_v4.log",
-    "/sdcard/roxs_v4.log",
-}) do
-    local ok = pcall(function()
-        local f = io.open(p, "a")
-        if f then f:close() end
-    end)
-    if ok then LOG_PATH = p; break end
-end
-if not LOG_PATH then return end
-
-local function W(msg)
+local LOG = "/sdcard/fake_gacha.log"
+local function W(m)
     pcall(function()
-        local f = io.open(LOG_PATH, "a")
-        if f then
-            f:write(os.date("%H:%M:%S") .. " [" .. VERSION .. "] " .. tostring(msg) .. "\n")
-            f:close()
-        end
+        local f = io.open(LOG, "a")
+        if f then f:write(os.date("%H:%M:%S") .. " " .. tostring(m) .. "\n"); f:close() end
     end)
 end
 
-W("=== BOOT " .. os.date() .. " ===")
+W("=== fake_gacha boot " .. os.date() .. " ===")
 
--- Hook EVERY protocol handler's send_* and on_*_rsp
-local hookedSend, hookedRsp = 0, 0
-local handlerCount = 0
+local function safeReq(...)
+    for _, p in ipairs({...}) do
+        local ok, m = pcall(require, p)
+        if ok and m then return m end
+    end
+    return nil
+end
 
-for path, mod in pairs(package.loaded) do
-    if type(path) == "string" and path:find("client.network.Protocol.", 1, true) and type(mod) == "table" then
-        handlerCount = handlerCount + 1
-        for name, fn in pairs(mod) do
-            if type(name) == "string" and type(fn) == "function" then
-                if name:find("^send_") then
-                    local orig = fn
-                    mod[name] = function(...)
-                        local n = select("#", ...)
-                        local parts = {}
-                        for i = 1, n do
-                            local v = select(i, ...)
-                            if type(v) == "table" then
-                                local c = 0
-                                for _ in pairs(v) do c = c + 1 end
-                                parts[i] = "<table:" .. c .. ">"
-                            else
-                                parts[i] = tostring(v)
-                            end
-                        end
-                        W(">>> CALL " .. path .. " :: " .. name .. " (" .. n .. "): " .. table.concat(parts, " | "))
-                        local ok, r1, r2, r3 = pcall(orig, ...)
-                        W("<<< RET " .. name .. " ok=" .. tostring(ok) .. " r=" .. tostring(r1))
-                        if ok then return r1, r2, r3 end
-                        return r1
+-- ============ FAKE UC (still keep client happy) ============
+local FAKE = 999999999
+pcall(function()
+    local d = _G.DataMgr
+    if d then
+        d.uc = FAKE; d.UC = FAKE; d.ticket = FAKE
+        d.GetUC = function() return FAKE end
+        d.CheckUC = function() return true end
+        d.CheckIsEnough = function() return true end
+    end
+end)
+
+-- ============ POOL CACHE ============
+-- Read from activity module, try multiple fields
+local function getPool(activityId)
+    local mods = {
+        safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity"),
+        safeReq("client.slua.logic.lobby_activity.logic_luckyunback_activity"),
+        safeReq("client.slua.logic.lobby_activity.logic_luckydouble_activity"),
+        safeReq("client.slua.logic.lobby_activity.logic_scrapgold_draw"),
+    }
+    for _, m in ipairs(mods) do
+        if m then
+            local pools = {
+                m.poolItemConfig,   -- the big pool (34 items)
+                m.item_table,       -- item table
+                m.pool_info,        -- pool entries
+                m.reward_list,      -- reward list
+            }
+            for _, p in ipairs(pools) do
+                if type(p) == "table" then
+                    local n = 0
+                    for _ in pairs(p) do n = n + 1 end
+                    if n > 0 then
+                        W("pool found in " .. tostring(m) .. " size=" .. n)
+                        return p
                     end
-                    hookedSend = hookedSend + 1
-                elseif name:find("^on_") and name:find("_rsp") then
-                    local orig = fn
-                    mod[name] = function(...)
-                        local n = select("#", ...)
-                        local parts = {}
-                        for i = 1, n do
-                            local v = select(i, ...)
-                            if type(v) == "table" then
-                                local c = 0
-                                for _ in pairs(v) do c = c + 1 end
-                                parts[i] = "<table:" .. c .. ">"
-                            else
-                                parts[i] = tostring(v)
-                            end
-                        end
-                        W(">>> RSP " .. path .. " :: " .. name .. " (" .. n .. "): " .. table.concat(parts, " | "))
-                        return orig(...)
-                    end
-                    hookedRsp = hookedRsp + 1
                 end
             end
         end
     end
+    W("NO POOL FOUND for " .. tostring(activityId))
+    return nil
 end
 
-W("handlers=" .. handlerCount .. " sends_hooked=" .. hookedSend .. " rsps_hooked=" .. hookedRsp)
+-- ============ WEIGHT-BASED PICK ============
+local function pickFromPool(pool, drawCount)
+    local arr = {}
+    for _, v in pairs(pool) do
+        if type(v) == "table" then arr[#arr+1] = v end
+    end
+    if #arr == 0 then return {} end
 
--- UC bypass
-local FAKE = 999999999
-local dMgr = _G.DataMgr
-if dMgr then
-    pcall(function() dMgr.uc = FAKE; dMgr.UC = FAKE; dMgr.ticket = FAKE end)
-    pcall(function() dMgr.GetUC = function() return FAKE end end)
-    pcall(function() dMgr.CheckUC = function() return true end end)
-    pcall(function() dMgr.CheckIsEnough = function() return true end end)
-    W("UC patched")
+    -- weighted selection
+    local picks = {}
+    for i = 1, drawCount do
+        local total = 0
+        for _, item in ipairs(arr) do
+            local w = tonumber(item.award_weight) or tonumber(item.weight) or 1
+            if w > 0 then total = total + w end
+        end
+        local r = math.random() * total
+        local acc = 0
+        local chosen = arr[1]
+        for _, item in ipairs(arr) do
+            local w = tonumber(item.award_weight) or tonumber(item.weight) or 1
+            acc = acc + w
+            if r <= acc then chosen = item; break end
+        end
+        picks[#picks+1] = chosen
+    end
+    return picks
 end
 
--- Luckyback + unback price = 0
-for _, p in ipairs({
-    "client.slua.logic.lobby_activity.logic_luckyback_activity",
-    "client.slua.logic.lobby_activity.logic_luckyunback_activity",
-}) do
-    local ok, m = pcall(require, p)
-    if ok and m then
-        pcall(function() m.GetOneDrawDiscountPrice = function() return 0 end end)
-        pcall(function() m.GetTenDrawDiscountPrice = function() return 0 end end)
-        pcall(function() m.HasEnoughUC = function() return true end end)
-        pcall(function() m.GetNextDrawCost = function() return 0 end end)
+-- ============ BUILD FAKE RSP PAYLOAD ============
+local function buildRewardList(picks)
+    local out = {}
+    for i, item in ipairs(picks) do
+        local resid = item.award_item_id or item.resid or item.itemid or item.id or 403003
+        local count = item.award_item_num or item.count or 1
+        table.insert(out, {
+            resid = resid,
+            res_id = resid,
+            count = count,
+            index = i,
+            display_sort = i,
+            close_time = 0,
+            show_new = false,
+            is_show_up = false,
+            valid_hours = item.award_item_valid_time or 0,
+        })
+    end
+    return out
+end
+
+local function buildDecomposeList(rewardList)
+    local out = {}
+    for i, _ in ipairs(rewardList) do
+        out[i] = { resid = 0, count = 0 }
+    end
+    return out
+end
+
+local function buildExtraInfo()
+    return {
+        cur_chest_progress = 0,
+        cur_draw_voucher_num = 0,
+        uc_cost = 0,
+        uc_ten_cost = 0,
+        can_dis_draw = false,
+        dis_draw_price = 0,
+        return_uc_count = 0,
+    }
+end
+
+-- ============ HOOK: LuckybackHandler (main path) ============
+local LB = safeReq("client.network.Protocol.LuckybackHandler")
+if LB then
+    local origSend = LB.send_do_one_draw_back_by_activity_req
+    if type(origSend) == "function" then
+        LB.send_do_one_draw_back_by_activity_req = function(activityId, drawCount, arg3, voucherId)
+            W("DRAW activityId=" .. tostring(activityId) .. " drawCount=" .. tostring(drawCount))
+
+            local pool = getPool(activityId)
+            local count = (tonumber(drawCount) == 2) and 10 or 1
+            local picks = {}
+
+            if pool then
+                picks = pickFromPool(pool, count)
+            end
+
+            -- fallback: if no pool, just pick junk IDs
+            if #picks == 0 then
+                for i = 1, count do
+                    picks[i] = { award_item_id = 403003, award_item_num = 1 }
+                end
+            end
+
+            local rewardList = buildRewardList(picks)
+            local decomposeList = buildDecomposeList(rewardList)
+            local extraInfo = buildExtraInfo()
+
+            W("faking RSP: " .. count .. " items")
+
+            -- Fire the RSP locally — this is what the client UI listens to
+            local ok, err = pcall(
+                LB.on_do_one_draw_back_by_activity_rsp,
+                0,                    -- success errCode
+                activityId,
+                rewardList,
+                decomposeList,
+                extraInfo
+            )
+            W("RSP fired ok=" .. tostring(ok) .. " err=" .. tostring(err))
+
+            -- Also try alternate shapes (in case the client expects different args)
+            if not ok then
+                pcall(LB.on_do_one_draw_back_by_activity_rsp, 0, activityId, rewardList)
+                pcall(LB.on_do_one_draw_back_by_activity_rsp, 0, rewardList)
+                pcall(LB.on_do_one_draw_back_by_activity_rsp, 0)
+            end
+
+            return nil
+        end
+        W("hooked LuckybackHandler.send_do_one_draw_back_by_activity_req")
+    else
+        W("NO send_do_one_draw_back_by_activity_req")
+    end
+else
+    W("LuckybackHandler NOT LOADED")
+end
+
+-- ============ HOOK: StoreHandler (secondary path) ============
+local SH = safeReq("client.network.Protocol.StoreHandler")
+if SH then
+    if type(SH.send_do_one_draw_by_activity_req) == "function" then
+        local orig = SH.send_do_one_draw_by_activity_req
+        SH.send_do_one_draw_by_activity_req = function(activityId, roundCount, hadDrawCount, voucherId)
+            W("StoreHandler DRAW activityId=" .. tostring(activityId))
+            local pool = getPool(activityId)
+            local count = (tonumber(roundCount) == 2 or tonumber(roundCount) == 10) and 10 or 1
+            local picks = pool and pickFromPool(pool, count) or {}
+            if #picks == 0 then
+                for i = 1, count do picks[i] = { award_item_id = 403003, award_item_num = 1 } end
+            end
+            local rewardList = buildRewardList(picks)
+            pcall(SH.on_do_one_draw_by_activity_rsp, 0, activityId, rewardList, buildDecomposeList(rewardList))
+            return nil
+        end
+        W("hooked StoreHandler.send_do_one_draw_by_activity_req")
     end
 end
-W("activity prices patched")
 
--- Heartbeat
-local t_ok, ticker = pcall(require, "common.time_ticker")
-if t_ok and ticker and ticker.AddTimerLoop then
-    local tick = 0
-    ticker.AddTimerLoop(0, function()
-        pcall(function()
-            tick = tick + 1
-            if tick % 20 == 0 then
-                if dMgr then pcall(function() dMgr.uc = FAKE end) end
-                W("alive tick=" .. tick)
-            end
-        end)
-    end, -1, 0.5)
-    W("ticker started")
-else
-    W("NO TICKER")
-end
-
+-- ============ LOG READY ============
 W("=== READY ===")
+print("[fake_gacha] ready")
