@@ -1,9 +1,9 @@
 -- ===============================================================
--- gacha_v4.lua — hook MODULE method (not handler) + force-enable button
+-- gacha_v5.lua — real pool from RSP, real UC cost
 -- Log: /storage/emulated/0/Android/data/com.pubg.imobile/files/gacha.log
 -- ===============================================================
 
-local V = "GACHA_V4"
+local V = "GACHA_V5"
 local LOG_PATH = "/storage/emulated/0/Android/data/com.pubg.imobile/files/gacha.log"
 
 local function W(m)
@@ -42,27 +42,19 @@ end
 
 local function setUC(n)
     if not dMgr then return end
+    n = math.max(0, math.floor(n))
     pcall(function() dMgr.uc = n end)
     pcall(function() dMgr.UC = n end)
     pcall(function() dMgr.ticket = n end)
-    if dMgr.roleData then
-        pcall(function() dMgr.roleData.uc = n end)
-    end
-    -- Fire UI refresh events
+    if dMgr.roleData then pcall(function() dMgr.roleData.uc = n end) end
     local ES = _G.EventSystem
     local ET = _G.EVENTTYPE_DATA_MGR
     if ES and ET and ES.postEvent then
-        if _G.EVENTID_DATAMGR_GOLD_CHANGE then
-            pcall(function() ES:postEvent(ET, _G.EVENTID_DATAMGR_GOLD_CHANGE, n) end)
-        end
-        if _G.EVENTID_DATAMGR_TICKET_CHANGE then
-            pcall(function() ES:postEvent(ET, _G.EVENTID_DATAMGR_TICKET_CHANGE, n) end)
-        end
-        if _G.EVENTID_DATAMGR_DIAMOND_CHANGE then
-            pcall(function() ES:postEvent(ET, _G.EVENTID_DATAMGR_DIAMOND_CHANGE, n) end)
+        for _, evName in ipairs({ "EVENTID_DATAMGR_GOLD_CHANGE", "EVENTID_DATAMGR_TICKET_CHANGE", "EVENTID_DATAMGR_DIAMOND_CHANGE" }) do
+            local ev = _G[evName]
+            if ev then pcall(function() ES:postEvent(ET, ev, n) end) end
         end
     end
-    -- Also try SafePostEvent
     pcall(function()
         if _G.SafePostEvent and _G.EVENTTYPE_ROLE and _G.EVENTID_ROLE_DATA_UPDATE then
             _G.SafePostEvent(_G.EVENTTYPE_ROLE, _G.EVENTID_ROLE_DATA_UPDATE)
@@ -70,193 +62,250 @@ local function setUC(n)
     end)
 end
 
--- Pad and refresh
 setUC(5000)
-W("UC set to 5000 + events fired")
+W("UC=5000")
 
--- Keep checkers true
-if dMgr then
-    pcall(function() dMgr.CheckUC = function() return true end end)
-    pcall(function() dMgr.CheckIsEnough = function() return true end end)
-    pcall(function() dMgr.CheckMoney = function() return true end end)
-    pcall(function() dMgr.CheckCurrency = function() return true end end)
-    pcall(function() dMgr.GetUC = function() return getUC() end end)
-end
+-- ============ HUNT POOL FROM RSP ============
+-- The response on_get_lucky_draw_back_activity_rsp has the real pool
+local rspPool = nil
+local rspPoolTime = 0
+local rspActivityId = 0
 
--- ============ RESET isWaitingForRes on all activity modules ============
-local function resetFlags()
-    local paths = {
-        "client.slua.logic.lobby_activity.logic_luckyback_activity",
-        "client.slua.logic.lobby_activity.logic_luckyunback_activity",
-        "client.slua.logic.lobby_activity.logic_luckydouble_activity",
-        "client.slua.logic.lobby_activity.logic_scrapgold_draw",
-    }
-    for _, p in ipairs(paths) do
-        local m = safeReq(p)
-        if m then
-            pcall(function() m.isWaitingForRes = false end)
-            pcall(function() m.bIsDrawRsp = false end)
-            pcall(function() m.bIsDrawing = false end)
-            pcall(function() m.bIsRandowAwardRsp = false end)
-            pcall(function() m.isClicked = false end)
-            pcall(function() m.bIsReq = false end)
+local function extractPoolFromTable(t, depth)
+    depth = depth or 0
+    if depth > 3 or type(t) ~= "table" then return nil end
+    -- Look for known pool key names
+    for _, k in ipairs({ "item_table", "poolItemConfig", "pool_info", "reward_list", "award_list", "items" }) do
+        local v = t[k]
+        if type(v) == "table" then
+            local n = 0; for _ in pairs(v) do n = n + 1 end
+            if n >= 3 then
+                return v, k
+            end
         end
     end
-end
-resetFlags()
-W("flags reset")
-
--- ============ UC check bypass on LuckySpin module ============
-local function patchUCModule()
-    local m = safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity")
-    if m then
-        pcall(function() m.GetOneDrawDiscountPrice = function() return 0 end end)
-        pcall(function() m.GetTenDrawDiscountPrice = function() return 0 end end)
-        pcall(function() m.GetOneDrawOriginalPrice = function() return 20 end end)
-        pcall(function() m.GetTenDrawOriginalPrice = function() return 200 end end)
-        pcall(function() m.HasEnoughUC = function() return true end end)
-        pcall(function() m.CheckCanDraw = function() return true end end)
-        pcall(function() m.CheckMoneyEnough = function() return true end end)
-    end
-    local u = safeReq("client.slua.logic.lobby_activity.logic_luckyunback_activity")
-    if u then
-        pcall(function() u.GetNextDrawCost = function() return 0 end end)
-        pcall(function() u.HasEnoughUC = function() return true end end)
-        pcall(function() u.CheckCanDraw = function() return true end end)
-    end
-end
-patchUCModule()
-W("UC module methods patched")
-
--- ============ POOL ============
-local poolCache, poolTime = nil, 0
-local function getPool()
-    local now = os.time()
-    if poolCache and (now - poolTime) < 20 then return poolCache end
-    local m = safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity")
-    if m then
-        for _, k in ipairs({ "poolItemConfig", "item_table", "pool_info", "reward_list" }) do
-            local p = m[k]
-            if type(p) == "table" then
-                local n = 0; for _ in pairs(p) do n = n + 1 end
-                if n > 0 then
-                    poolCache = p; poolTime = now
-                    W("pool " .. k .. " n=" .. n)
-                    return p
-                end
-            end
+    -- recurse into nested tables
+    for k, v in pairs(t) do
+        if type(v) == "table" then
+            local found, key = extractPoolFromTable(v, depth + 1)
+            if found then return found, key end
         end
     end
     return nil
 end
 
-local function pickRewards(count)
-    local pool = getPool()
+-- ============ FIELD AUTO-DETECT ============
+local idFields = { "award_item_id", "item_id", "itemId", "resid", "res_id", "id" }
+local cntFields = { "award_item_num", "item_num", "item_count", "count", "num" }
+local weightFields = { "award_weight", "weight", "rate", "probability", "prob" }
+local qualityFields = { "show_quality", "quality", "rare" }
+
+local function detectField(sample, candidates)
+    for _, name in ipairs(candidates) do
+        local v = sample[name]
+        if v ~= nil then return name end
+    end
+    -- scan all keys for match
+    for k, v in pairs(sample) do
+        for _, name in ipairs(candidates) do
+            if k == name then return name end
+        end
+    end
+    return nil
+end
+
+local function dumpItem(item, tag)
+    local parts = {}
+    local count = 0
+    for k, v in pairs(item) do
+        count = count + 1
+        if count > 25 then parts[#parts+1] = "<trunc>"; break end
+        local tv = type(v)
+        if tv == "table" then
+            local n = 0; for _ in pairs(v) do n = n + 1 end
+            parts[#parts+1] = k .. "=<tbl:" .. n .. ">"
+        elseif tv == "string" then
+            local vs = tostring(v)
+            if #vs > 40 then vs = vs:sub(1, 40) .. ".." end
+            parts[#parts+1] = k .. "=" .. vs
+        else
+            parts[#parts+1] = k .. "=" .. tostring(v)
+        end
+    end
+    W(tag .. " keys: " .. table.concat(parts, " | "))
+end
+
+-- ============ WEIGHTED PICK WITH AUTO-DETECT ============
+local lastDetect = {}
+
+local function pickRewards(pool, count)
     if not pool then return {} end
     local arr = {}
     for _, v in pairs(pool) do
         if type(v) == "table" then arr[#arr+1] = v end
     end
     if #arr == 0 then return {} end
-    local total = 0
-    for _, it in ipairs(arr) do
-        local w = tonumber(it.award_weight) or tonumber(it.weight) or 1
-        if w > 0 then total = total + w end
+
+    -- detect field names from first item
+    local sample = arr[1]
+    local idF = detectField(sample, idFields)
+    local cntF = detectField(sample, cntFields)
+    local weightF = detectField(sample, weightFields)
+
+    -- dump once per activity
+    local sig = tostring(idF) .. "|" .. tostring(cntF) .. "|" .. tostring(weightF) .. "|" .. #arr
+    if lastDetect.sig ~= sig then
+        lastDetect.sig = sig
+        W("DETECT id=" .. tostring(idF) .. " cnt=" .. tostring(cntF) .. " weight=" .. tostring(weightF) .. " pool=" .. #arr)
+        dumpItem(sample, "SAMPLE[1]")
+        if arr[2] then dumpItem(arr[2], "SAMPLE[2]") end
+        if arr[3] then dumpItem(arr[3], "SAMPLE[3]") end
     end
+
+    if not idF then
+        W("no id field found — dumping all pool keys")
+        for k in pairs(sample) do W("  key: " .. tostring(k)) end
+        return {}
+    end
+
+    local function getId(it) return tonumber(it[idF]) or it[idF] end
+    local function getCnt(it) return tonumber(it[cntF]) or 1 end
+    local function getW(it)
+        if weightF then
+            local w = tonumber(it[weightF]) or 1
+            return w > 0 and w or 1
+        end
+        return 1
+    end
+
+    -- total weight
+    local total = 0
+    for _, it in ipairs(arr) do total = total + getW(it) end
     if total <= 0 then total = #arr end
+
     local out = {}
     for i = 1, count do
         local r = math.random() * total
         local acc = 0
         local chosen = arr[1]
         for _, it in ipairs(arr) do
-            local w = tonumber(it.award_weight) or tonumber(it.weight) or 1
-            if w <= 0 then w = 1 end
-            acc = acc + w
+            acc = acc + getW(it)
             if r <= acc then chosen = it; break end
         end
-        local resid = chosen.award_item_id or chosen.resid or chosen.res_id
-            or chosen.itemid or chosen.id or 403003
-        local cnt = chosen.award_item_num or chosen.count or 1
-        out[#out+1] = { resid = resid, count = cnt, valid_hours = 0 }
+        local resid = getId(chosen)
+        if resid then
+            out[#out+1] = { resid = resid, count = getCnt(chosen), valid_hours = 0 }
+        end
     end
     return out
 end
 
--- ============ HUNT ShowRewardPanel + EndRewardPanel ============
--- Look for the REAL one — search by usage pattern
-local function findRealShowRewardPanel()
-    -- preferred: from LuckybackHandler or StoreHandler
-    local LB = safeReq("client.network.Protocol.LuckybackHandler")
-    local SH = safeReq("client.network.Protocol.StoreHandler")
-    local candidates = { LB, SH, _G }
-    for _, mod in ipairs(candidates) do
-        if mod then
-            if type(mod.ShowRewardPanel) == "function" then return mod.ShowRewardPanel, "mod" end
-            if type(mod.showRewardPanel) == "function" then return mod.showRewardPanel, "mod-lower" end
-        end
+-- ============ FIND POOL: prefer rsp-captured, fallback module ============
+local function getCurrentPool(activityId)
+    -- prefer recently captured RSP pool for this activity
+    if rspPool and (os.time() - rspPoolTime) < 60 then
+        return rspPool, "rsp"
     end
-    -- search by name in package.loaded
-    for path, mod in pairs(package.loaded) do
-        if type(mod) == "table" then
-            if type(mod.ShowRewardPanel) == "function" then
-                -- skip if from unrelated namespaces
-                if not path:find("return_activity") then
-                    return mod.ShowRewardPanel, path
-                end
+    -- fallback to module's poolItemConfig
+    local m = safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity")
+    if m then
+        for _, k in ipairs({ "item_table", "poolItemConfig", "pool_info", "reward_list" }) do
+            local p = m[k]
+            if type(p) == "table" then
+                local n = 0; for _ in pairs(p) do n = n + 1 end
+                if n >= 3 then return p, "module:" .. k end
             end
         end
     end
-    return nil, nil
+    return nil, "none"
 end
 
-local ShowRewardPanel, SRP_src = findRealShowRewardPanel()
-W("ShowRewardPanel=" .. tostring(ShowRewardPanel ~= nil) .. " src=" .. tostring(SRP_src))
-
--- ============ Find the UI panel that luckyback uses ============
-local function findRewardUI()
-    local UM = _G.UIManager
-    if not UM or not UM.UI_Config then return nil end
-    local cfg = UM.UI_Config
-    -- look for panel names
-    local names = {
-        "new_supply_get_panel", "supply_get_panel", "supply_get",
-        "luckyback_get_panel", "lucky_get_panel", "reward_panel",
-        "new_reward_panel", "common_reward_panel",
-        "luckyback_reward_panel", "get_item_panel",
-    }
-    for _, name in ipairs(names) do
-        if cfg[name] then return name, cfg[name] end
+-- ============ REAL COST FROM MODULE ============
+local function getCost(drawCount)
+    local m = safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity")
+    if m then
+        -- try getters first
+        if drawCount >= 10 then
+            if m.GetTenDrawOriginalPrice then
+                local ok, v = pcall(m.GetTenDrawOriginalPrice)
+                if ok and tonumber(v) and tonumber(v) > 0 then return tonumber(v) end
+            end
+            if m.tenDrawFinalPrice and tonumber(m.tenDrawFinalPrice) > 0 then return tonumber(m.tenDrawFinalPrice) end
+            if m.tenDrawOriginalPrice and tonumber(m.tenDrawOriginalPrice) > 0 then return tonumber(m.tenDrawOriginalPrice) end
+        else
+            if m.GetOneDrawDiscountPrice then
+                local ok, v = pcall(m.GetOneDrawDiscountPrice)
+                if ok and tonumber(v) and tonumber(v) > 0 then return tonumber(v) end
+            end
+            if m.oneDrawFinalPrice and tonumber(m.oneDrawFinalPrice) > 0 then return tonumber(m.oneDrawFinalPrice) end
+            if m.oneDrawOriginalPrice and tonumber(m.oneDrawOriginalPrice) > 0 then return tonumber(m.oneDrawOriginalPrice) end
+        end
+        -- globalConfig
+        local gc = m.globalConfig
+        if type(gc) == "table" then
+            if drawCount >= 10 and tonumber(gc.tenDrawOriginalPrice) then
+                return tonumber(gc.tenDrawOriginalPrice)
+            end
+            if drawCount < 10 and tonumber(gc.oneDrawOriginalPrice) then
+                return tonumber(gc.oneDrawOriginalPrice)
+            end
+        end
     end
-    return nil, nil
+    return drawCount >= 10 and 200 or 20
 end
 
-local uiPanelName, uiPanelCfg = findRewardUI()
-W("uiPanelName=" .. tostring(uiPanelName))
+-- ============ ACTIVITY ID FROM MODULE ============
+local function getCurrentActivityId()
+    local m = safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity")
+    if not m then return 0 end
+    -- try multiple field names
+    for _, k in ipairs({ "activityId", "ActivityId", "activity_id", "actId" }) do
+        local v = m[k]
+        if v and tonumber(v) and tonumber(v) > 0 then return tonumber(v) end
+    end
+    return 0
+end
 
--- ============ CORE FAKE DRAW ============
+-- ============ CORE DRAW ============
 local lastCall = 0
 
-local function doFakeDraw(activityId, drawCount)
+local function doFakeDraw(drawCount)
     local now = os.time()
     if now - lastCall < 1 then W("debounced"); return end
     lastCall = now
 
-    -- UC cost
-    local cost = (drawCount == 10) and 200 or 20
-    local before = getUC()
-    if before < cost then setUC(5000); before = 5000 end
-    setUC(before - cost)
-    W("UC " .. before .. "->" .. (before-cost) .. " cost=" .. cost)
+    local activityId = getCurrentActivityId()
+    local cost = getCost(drawCount)
 
-    -- Rewards
-    local rewards = pickRewards(drawCount)
-    W("picked " .. #rewards .. " rewards for act=" .. activityId)
+    -- spend UC (pad if below cost)
+    local cur = getUC()
+    if cur < cost then
+        W("UC low (" .. cur .. ") — padding to 5000")
+        setUC(5000)
+        cur = 5000
+    end
+    setUC(cur - cost)
+    W("draw cnt=" .. drawCount .. " act=" .. activityId .. " cost=" .. cost .. " UC " .. cur .. "->" .. (cur - cost))
 
-    -- Show via UI panel if we found it
-    local shown = false
+    -- pick rewards
+    local pool, src = getCurrentPool(activityId)
+    W("pool src=" .. src .. " size=" .. (pool and (function() local n=0 for _ in pairs(pool) do n=n+1 end return n end)() or 0))
+
+    local rewards = pickRewards(pool, drawCount)
+    W("picked " .. #rewards .. " rewards")
+
+    if #rewards == 0 then
+        for i = 1, drawCount do
+            rewards[i] = { resid = 403003, count = 1, valid_hours = 0 }
+        end
+        W("fallback to 403003 x" .. drawCount)
+    end
+
+    -- Show panel
     local UM = _G.UIManager
-    if UM and uiPanelName and uiPanelCfg then
+    local shown = false
+    if UM and UM.UI_Config and UM.UI_Config.new_supply_get_panel then
+        local cfg = UM.UI_Config.new_supply_get_panel
         local ok, err = pcall(function()
             local rewardList = {}
             for i, r in ipairs(rewards) do
@@ -266,143 +315,101 @@ local function doFakeDraw(activityId, drawCount)
                     to_res_id = 0, to_res_cnt = 0, ShowUseTime = true,
                 }
             end
-            if UM.IsUIShow and UM.IsUIShow(uiPanelCfg) then
-                local boxUI = UM.GetUI(uiPanelCfg)
+            if UM.IsUIShow and UM.IsUIShow(cfg) then
+                local boxUI = UM.GetUI(cfg)
                 if boxUI and boxUI.TryShowSupplyGetPanel then
                     boxUI:TryShowSupplyGetPanel(rewardList, drawCount >= 10, {needShowMovie = true})
                     shown = true
                 end
             else
-                UM.ShowUI(uiPanelCfg, rewardList, drawCount >= 10, {needShowMovie = true})
+                UM.ShowUI(cfg, rewardList, drawCount >= 10, {needShowMovie = true})
                 shown = true
             end
         end)
-        W("panel show ok=" .. tostring(ok) .. " shown=" .. tostring(shown) .. " err=" .. tostring(err))
-    end
-
-    if not shown and ShowRewardPanel then
-        local ok, err = pcall(ShowRewardPanel, rewards)
-        W("SRP call ok=" .. tostring(ok) .. " err=" .. tostring(err))
+        W("panel shown=" .. tostring(shown) .. " err=" .. tostring(err))
     end
 
     -- Refresh events
     pcall(function()
         if _G.SafePostEvent and _G.EVENTTYPE_ACTIVITY then
-            if _G.EVENTID_LUCKYBACK_STATUS_CHANGE then
-                _G.SafePostEvent(_G.EVENTTYPE_ACTIVITY, _G.EVENTID_LUCKYBACK_STATUS_CHANGE)
-            end
-            if _G.EVENTID_LUCKYBACK_REFRESH then
-                _G.SafePostEvent(_G.EVENTTYPE_ACTIVITY, _G.EVENTID_LUCKYBACK_REFRESH)
+            for _, evName in ipairs({ "EVENTID_LUCKYBACK_STATUS_CHANGE", "EVENTID_LUCKYBACK_REFRESH", "EVENTID_LUCKUNYBACK_STATUS_CHANGE" }) do
+                local ev = _G[evName]
+                if ev then _G.SafePostEvent(_G.EVENTTYPE_ACTIVITY, ev) end
             end
         end
     end)
 end
 
--- ============ HOOK: module method (what button actually calls) ============
-local function hookModuleMethod(mod, methodName, wrapper)
-    if type(mod) ~= "table" then return false end
-    if type(mod[methodName]) ~= "function" then return false end
-    local orig = mod[methodName]
-    mod[methodName] = wrapper(orig)
-    return true
-end
-
--- ============ HOOK: Luckyback activity module direct methods ============
-local LB_mod = safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity")
-if LB_mod then
-    local hooked = false
-    if type(LB_mod.do_one_draw_back_by_activity_req) == "function" then
-        local orig = LB_mod.do_one_draw_back_by_activity_req
-        LB_mod.do_one_draw_back_by_activity_req = function(arg1, arg2, ...)
-            W(">>> MODULE do_one_draw_back_by_activity_req arg1=" .. tostring(arg1) .. " arg2=" .. tostring(arg2))
-            local cnt = (arg1 == 2) and 10 or 1
-            doFakeDraw(LB_mod.ActivityId or 0, cnt)
-            return nil
-        end
-        hooked = true
-        W("hooked LB_mod.do_one_draw_back_by_activity_req")
-    end
-    if type(LB_mod.do_one_draw_by_tick) == "function" then
-        LB_mod.do_one_draw_by_tick = function(...)
-            W(">>> MODULE do_one_draw_by_tick")
-            doFakeDraw(LB_mod.ActivityId or 0, 1)
-            return nil
-        end
-        hooked = true
-        W("hooked LB_mod.do_one_draw_by_tick")
-    end
-    -- also try common names
-    for _, name in ipairs({ "DoDraw", "Draw", "RequestDraw", "OneDraw", "TenDraw" }) do
-        if type(LB_mod[name]) == "function" and not hooked then
-            local orig = LB_mod[name]
-            LB_mod[name] = function(...)
-                W(">>> MODULE " .. name)
-                doFakeDraw(LB_mod.ActivityId or 0, 1)
-                return nil
-            end
-            hooked = true
-            W("hooked LB_mod." .. name)
-        end
-    end
-    if not hooked then W("no module method hooked on LB_mod") end
-end
-
--- ============ HOOK: Handler (fallback) ============
+-- ============ HOOK: RSP to capture pool ============
 local LB_h = safeReq("client.network.Protocol.LuckybackHandler")
-if LB_h and type(LB_h.send_do_one_draw_back_by_activity_req) == "function" then
-    LB_h.send_do_one_draw_back_by_activity_req = function(activityId, dc, _, _)
-        W(">>> HANDLER send dc=" .. tostring(dc))
-        local cnt = (tonumber(dc) == 2) and 10 or 1
-        doFakeDraw(tonumber(activityId) or 0, cnt)
-        return nil
-    end
-    W("hooked handler send")
-end
-
--- ============ FORCE ENABLE DRAW BUTTONS ============
-local function forceEnableButtons()
-    local paths = {
-        "client.slua.umg.lobby_activity.LuckySpin.TraitClassStyle.Supply.T_BackStyleDrawTenBtn_Supply",
-        "client.slua.umg.lobby_activity.LuckySpin.TraitClassStyle.Supply.T_BackStyleDrawOneBtn_Supply",
-    }
-    for _, p in ipairs(paths) do
-        local m = safeReq(p)
-        if m then
-            pcall(function()
-                if m.CheckIsShowReplaceDraw then m.CheckIsShowReplaceDraw = function() return true end end
-                if m.CanUse then m.CanUse = function() return true end end
-                if m.IsEnabled then m.IsEnabled = function() return true end end
-            end)
-            -- Hook click
-            for _, name in ipairs({ "_OnButtonClicked_DrawTen", "_OnButtonClicked_DrawOne", "OnClick" }) do
-                if type(m[name]) == "function" then
-                    local orig = m[name]
-                    m[name] = function(self, ...)
-                        W(">>> BTN " .. p .. "::" .. name)
-                        -- Try calling original; if it crashes, do fake
-                        local ok, err = pcall(orig, self, ...)
-                        W("btn orig ok=" .. tostring(ok))
-                        -- If the original didn't reach the handler within 100ms, do fake from here
-                        local t0 = os.time()
-                        -- We can't easily check "did handler fire" — just trust hook chain
-                        return
-                    end
-                    W("hooked button " .. name)
+if LB_h and type(LB_h.on_get_lucky_draw_back_activity_rsp) == "function" then
+    local orig = LB_h.on_get_lucky_draw_back_activity_rsp
+    LB_h.on_get_lucky_draw_back_activity_rsp = function(...)
+        local args = { ... }
+        -- try to find pool in args
+        for i, a in ipairs(args) do
+            if type(a) == "table" then
+                local found, key = extractPoolFromTable(a)
+                if found then
+                    rspPool = found
+                    rspPoolTime = os.time()
+                    local n = 0; for _ in pairs(found) do n = n + 1 end
+                    W("CAPTURED pool from rsp arg[" .. i .. "]: " .. key .. " n=" .. n)
+                    -- dump first item keys
+                    local first
+                    for _, v in pairs(found) do if type(v) == "table" then first = v; break end end
+                    if first then dumpItem(first, "RSP[1]") end
+                    break
                 end
             end
         end
+        return orig(...)
+    end
+    W("hooked rsp to capture pool")
+end
+
+-- ============ HOOK: MODULE draw methods ============
+local LB_mod = safeReq("client.slua.logic.lobby_activity.logic_luckyback_activity")
+if LB_mod then
+    if type(LB_mod.do_one_draw_back_by_activity_req) == "function" then
+        LB_mod.do_one_draw_back_by_activity_req = function(arg1, arg2)
+            W(">>> MODULE do_one_draw_back_by_activity_req arg1=" .. tostring(arg1) .. " arg2=" .. tostring(arg2))
+            doFakeDraw((arg1 == 2) and 10 or 1)
+            return nil
+        end
+        W("hooked module draw")
     end
 end
-forceEnableButtons()
+
+-- hook handler as fallback
+if LB_h and type(LB_h.send_do_one_draw_back_by_activity_req) == "function" then
+    LB_h.send_do_one_draw_back_by_activity_req = function(activityId, dc, _, _)
+        W(">>> HANDLER send act=" .. tostring(activityId) .. " dc=" .. tostring(dc))
+        doFakeDraw((tonumber(dc) == 2) or (tonumber(dc) == 10) and 10 or 1)
+        return nil
+    end
+end
 
 -- ============ boot popup ============
-pop(V, "Loaded.\nUC=" .. getUC() .. "\nSRP: " .. tostring(SRP_src or "NO") ..
-      "\nUI Panel: " .. tostring(uiPanelName or "NO") .. "\nLog: files/gacha.log")
+pop(V, "Loaded.\nUC=" .. getUC() .. "\nLog: files/gacha.log")
 
--- Public
-_G.GachaStatus = function()
-    pop(V, "UC=" .. getUC() .. "\nLog: files/gacha.log")
+-- public helper
+_G.GachaDumpPool = function()
+    local pool, src = getCurrentPool(0)
+    if pool then
+        local n = 0; for _ in pairs(pool) do n = n + 1 end
+        W("MANUAL DUMP src=" .. src .. " n=" .. n)
+        local i = 0
+        for _, v in pairs(pool) do
+            i = i + 1
+            if i > 5 then break end
+            dumpItem(v, "DUMP[" .. i .. "]")
+        end
+        pop(V, "Dumped " .. n .. " items to log")
+    else
+        pop(V, "No pool")
+    end
 end
 
 W("=== READY ===")
-print("[gacha_v4] ready")
+print("[gacha_v5] ready")
