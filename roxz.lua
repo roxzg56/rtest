@@ -1,17 +1,11 @@
 -- ===============================================================
--- gacha_v6.3.lua — Client-side inventory + wardrobe + equip
---   * Draw pe item → inventory add
---   * Wardrobe mein show (refresh events)
---   * Equip click → force success
---   * Relog ke baad persist (JSON file)
---   * Re-inject timer (server sync ke baad bhi rahe)
+-- gacha_v7.1.lua — silent (no popup)
 -- Log: /storage/emulated/0/Android/data/com.pubg.imobile/files/gacha.log
--- Items: /storage/emulated/0/Android/data/com.pubg.imobile/files/gacha_items.json
 -- ===============================================================
 
-local V = "GACHA_V6.3"
-local LOG_PATH   = "/storage/emulated/0/Android/data/com.pubg.imobile/files/gacha.log"
-local ITEMS_PATH = "/storage/emulated/0/Android/data/com.pubg.imobile/files/gacha_items.json"
+local V = "GACHA_V7.1"
+local LOG_PATH = "/storage/emulated/0/Android/data/com.pubg.imobile/files/gacha.log"
+local SHOW_POPUP = false   -- <<<<< YAHAN TOGGLE — false = silent
 
 local function W(m)
     pcall(function()
@@ -21,6 +15,7 @@ local function W(m)
 end
 
 local function pop(t, m)
+    if not SHOW_POPUP then return end   -- silent gate
     pcall(function()
         local M = package.loaded["client.slua.logic.common.logic_common_msg_box"]
                     or require("client.slua.logic.common.logic_common_msg_box")
@@ -36,13 +31,7 @@ local function safeReq(...)
     return nil
 end
 
--- JSON escape
-local function jEsc(s)
-    s = tostring(s)
-    return (s:gsub("\\","\\\\"):gsub("\"","\\\""):gsub("\n","\\n"):gsub("\r","\\r"))
-end
-
-W("=== BOOT " .. os.date() .. " ===")
+W("=== BOOT " .. os.date() .. " (silent) ===")
 
 -- ===============================================================
 -- UC LAYER
@@ -81,8 +70,9 @@ local function setUC(n)
     end)
 end
 
-setUC(randBigUC())
-W("UC boot = " .. getUC())
+local bootUC = randBigUC()
+setUC(bootUC)
+W("UC boot = " .. bootUC .. " (random 50M-80M)")
 
 local function applyRandomMovement()
     if math.random() < 0.40 then
@@ -153,7 +143,6 @@ local cntCandidates = { "award_item_num", "item_num", "item_count", "itemCount",
 local weightCandidates = { "award_weight", "weight", "rate", "probability", "prob" }
 local posCandidates = { "pos_id", "posId", "position", "index" }
 local vhCandidates = { "award_item_valid_time", "vaild_time", "valid_hours", "validHours" }
-local qualityCandidates = { "show_quality", "itemQuality", "quality" }
 
 local function detectField(sample, candidates)
     for _, name in ipairs(candidates) do
@@ -175,7 +164,6 @@ local function pickRewards(pool, count)
     local weightF = detectField(sample, weightCandidates)
     local posF = detectField(sample, posCandidates)
     local vhF = detectField(sample, vhCandidates)
-    local qF = detectField(sample, qualityCandidates)
     if not idF then W("no id field"); return {} end
 
     local total = 0
@@ -208,7 +196,6 @@ local function pickRewards(pool, count)
                 count = cntF and tonumber(chosen[cntF]) or 1,
                 valid_hours = vhF and tonumber(chosen[vhF]) or 0,
                 pos_id = posF and tonumber(chosen[posF]) or idx,
-                quality = qF and tonumber(chosen[qF]) or 0,
             }
         end
     end
@@ -221,7 +208,6 @@ local function pickRewards(pool, count)
                 count = cntF and tonumber(chosen[cntF]) or 1,
                 valid_hours = vhF and tonumber(chosen[vhF]) or 0,
                 pos_id = posF and tonumber(chosen[posF]) or i,
-                quality = qF and tonumber(chosen[qF]) or 0,
             }
         end
     end
@@ -315,211 +301,7 @@ local function buildServerShape(rewards)
 end
 
 -- ===============================================================
--- INVENTORY LAYER — find addItemToInventory and use it
--- ===============================================================
-local addItemFn, addItemSrc = nil, nil
-
-local function findAddItem()
-    -- global
-    if type(_G.addItemToInventory) == "function" then return _G.addItemToInventory, "global" end
-
-    local paths = {
-        "client.slua.logic.common.DataMgr",
-        "client.slua.logic.common.Logic_ItemUtils",
-        "client.slua.logic.common.ItemUtils",
-        "client.slua.logic.role.RoleData",
-        "client.slua.logic.role.role_data",
-        "client.slua.logic.role.logic_role",
-        "client.slua.logic.mall.logic_mall",
-        "client.slua.logic.common.logic_item_mgr",
-        "client.slua.logic.depot.logic_depot",
-        "client.slua.logic.wardrobe.logic_wardrobe",
-    }
-    for _, p in ipairs(paths) do
-        local m = safeReq(p)
-        if m then
-            for _, name in ipairs({
-                "addItemToInventory", "AddItem", "AddItemToBag",
-                "GiveItem", "AddItemToPackage", "AddToInventory",
-                "AddItemToDepot", "AddItemData",
-            }) do
-                if type(m[name]) == "function" then
-                    return m[name], p .. "::" .. name
-                end
-            end
-        end
-    end
-
-    -- deep scan
-    for path, mod in pairs(package.loaded) do
-        if type(mod) == "table" then
-            for _, name in ipairs({
-                "addItemToInventory", "AddItem", "AddItemToBag",
-                "GiveItem", "AddToInventory",
-            }) do
-                if type(mod[name]) == "function" then
-                    return mod[name], path .. "::" .. name
-                end
-            end
-        end
-    end
-    return nil, nil
-end
-
-addItemFn, addItemSrc = findAddItem()
-W("addItemToInventory src=" .. tostring(addItemSrc))
-
-local function tryAddItem(resid, cnt)
-    if not addItemFn then return false end
-    local tries = {
-        { resid },
-        { resid, cnt },
-        { resid, cnt, 0 },
-        { resid, cnt, 0, 1 },
-        { resid, cnt, 0, 1, false },
-    }
-    for _, args in ipairs(tries) do
-        local ok = pcall(addItemFn, unpack(args))
-        if ok then return true end
-    end
-    return false
-end
-
--- ===============================================================
--- LOCAL ITEM STORE (persistent)
--- ===============================================================
-local itemStore = {}  -- [resid] = { count = N, quality = Q, t = ts }
-
-local function loadItems()
-    local count = 0
-    pcall(function()
-        local f = io.open(ITEMS_PATH, "r")
-        if not f then return end
-        for line in f:lines() do
-            local rid = tonumber(line:match("\"resid\"%s*:%s*(%d+)"))
-            local cnt = tonumber(line:match("\"count\"%s*:%s*(%d+)")) or 1
-            local q   = tonumber(line:match("\"quality\"%s*:%s*(%d+)")) or 0
-            if rid then
-                itemStore[rid] = { count = cnt, quality = q, t = os.time() }
-                count = count + 1
-            end
-        end
-        f:close()
-    end)
-    W("loaded " .. count .. " items from disk")
-    return count
-end
-
-local function appendItemToDisk(resid, cnt, quality)
-    pcall(function()
-        local f = io.open(ITEMS_PATH, "a")
-        if f then
-            f:write("{\"resid\":" .. tostring(resid) ..
-                    ",\"count\":" .. tostring(cnt) ..
-                    ",\"quality\":" .. tostring(quality) ..
-                    ",\"t\":" .. tostring(os.time()) .. "}\n")
-            f:close()
-        end
-    end)
-end
-
--- ===============================================================
--- REFRESH EVENTS
--- ===============================================================
-local function fireWardrobeRefresh()
-    pcall(function()
-        if _G.SafePostEvent then
-            local ET_W = _G.EVENTTYPE_WARDROBE
-            local ET_D = _G.EVENTTYPE_DEPOT
-            local ET_R = _G.EVENTTYPE_ROLE
-            for _, evName in ipairs({
-                "EVENTID_WARDROBE_TICKET_UPDATE",
-                "EVENTID_WARDROBE_ITEM_UPDATE",
-                "EVENTID_WARDROBE_REFRESH",
-                "EVENTID_DEPOT_ITEM_CHANGE",
-                "EVENTID_DEPOT_REFRESH",
-            }) do
-                local ev = _G[evName]
-                if ev and ET_W then _G.SafePostEvent(ET_W, ev) end
-                if ev and ET_D then _G.SafePostEvent(ET_D, ev) end
-            end
-            if ET_R and _G.EVENTID_ROLE_DATA_UPDATE then
-                _G.SafePostEvent(ET_R, _G.EVENTID_ROLE_DATA_UPDATE)
-            end
-        end
-    end)
-end
-
--- Add item to local + disk
-local function registerItem(resid, cnt, quality)
-    if not resid then return end
-    resid = tonumber(resid); if not resid or resid <= 0 then return end
-    cnt = tonumber(cnt) or 1
-    quality = tonumber(quality) or 0
-
-    -- local store
-    if itemStore[resid] then
-        itemStore[resid].count = itemStore[resid].count + cnt
-    else
-        itemStore[resid] = { count = cnt, quality = quality, t = os.time() }
-        -- new to disk
-        appendItemToDisk(resid, cnt, quality)
-    end
-
-    -- try to add to game inventory
-    local ok = tryAddItem(resid, cnt)
-    W("registerItem resid=" .. resid .. " cnt=" .. cnt .. " add_ok=" .. tostring(ok))
-end
-
--- ===============================================================
--- EQUIP LAYER — hook put_on methods
--- ===============================================================
-local equipHooked = {}
-
-local function hookEquip(handlerPath, sendName, rspName)
-    local H = safeReq(handlerPath)
-    if not H or type(H) ~= "table" then return false end
-    if equipHooked[handlerPath .. "::" .. sendName] then return true end
-
-    if type(H[sendName]) == "function" then
-        local orig = H[sendName]
-        H[sendName] = function(...)
-            local args = { ... }
-            W(">>> EQUIP " .. sendName .. " args=" .. #args)
-            -- call original (server may reject)
-            local ok, r1, r2 = pcall(orig, ...)
-            -- force success rsp
-            if rspName and type(H[rspName]) == "function" then
-                pcall(H[rspName], 0, unpack(args))
-            end
-            return r1, r2
-        end
-        equipHooked[handlerPath .. "::" .. sendName] = true
-        W("hooked equip " .. handlerPath .. "::" .. sendName)
-        return true
-    end
-    return false
-end
-
--- Wardrobe equip methods
-hookEquip("client.network.Protocol.WardRobeHandler", "send_depot_put_on_req", "on_depot_put_on_rsp")
-hookEquip("client.network.Protocol.WardRobeHandler", "send_put_on_weapon_wear", "on_put_on_weapon_wear_rsp")
-hookEquip("client.network.Protocol.WardRobeHandler", "send_put_on_weapon_pendant_req", "on_put_on_weapon_pendant_rsp")
-hookEquip("client.network.Protocol.WardRobeHandler", "send_put_on_gold_dress_bind_req", "on_put_on_gold_dress_bind_rsp")
-hookEquip("client.network.Protocol.WardRobeHandler", "send_select_use_rolewear", "on_select_use_rolewear_rsp")
-hookEquip("client.network.Protocol.WardRobeHandler", "send_depot_set_head_show_req", "on_depot_set_head_show_rsp")
-hookEquip("client.network.Protocol.WardRobeHandler", "send_depot_set_skin_info_req", "on_depot_set_skin_info_rsp")
-
--- Vehicle
-hookEquip("client.network.Protocol.VehicleRefitHandler", "send_car_setting_req", "on_car_setting_rsp")
-hookEquip("client.network.Protocol.VehicleRefitHandler", "send_car_modification_req", "on_car_modification_rsp")
-hookEquip("client.network.Protocol.VehicleCollectHandler", "send_set_car_feature_switch_req", "on_set_car_feature_switch_rsp")
-
--- XSuit
-hookEquip("client.network.Protocol.XSuitHandler", "send_wear_gold_dress_req", "on_wear_gold_dress_rsp")
-
--- ===============================================================
--- CORE DRAW (with inventory integration)
+-- CORE DRAW
 -- ===============================================================
 local lastCall = 0
 
@@ -545,14 +327,6 @@ local function doFakeDraw(drawCount)
     if #rewards == 0 then
         for i = 1, drawCount do rewards[i] = { resid = 403003, count = 1, valid_hours = 0 } end
     end
-
-    -- ===== INVENTORY ADD (client-side) =====
-    for _, r in ipairs(rewards) do
-        pcall(registerItem, r.resid, r.count or 1, r.quality or 0)
-    end
-    fireWardrobeRefresh()
-    W("inventory refresh fired")
-    -- =======================================
 
     local rewardList = buildServerShape(rewards)
 
@@ -588,7 +362,7 @@ local function doFakeDraw(drawCount)
 end
 
 -- ===============================================================
--- HOOKS: pool capture, module draw, handler
+-- HOOKS
 -- ===============================================================
 local LB_h = safeReq("client.network.Protocol.LuckybackHandler")
 if LB_h and type(LB_h.on_get_lucky_draw_back_activity_rsp) == "function" then
@@ -635,79 +409,8 @@ if LB_h and type(LB_h.send_do_one_draw_back_by_activity_req) == "function" then
 end
 
 -- ===============================================================
--- RE-INJECT TIMER — keeps items alive after server sync
--- ===============================================================
-local function reinjectAll()
-    local n = 0
-    for resid, entry in pairs(itemStore) do
-        if tryAddItem(resid, entry.count) then n = n + 1 end
-    end
-    if n > 0 then
-        fireWardrobeRefresh()
-        W("reinject " .. n .. " items")
-    end
-end
-
-local function saveAllItems()
-    -- rewrite file with current state (dedup)
-    pcall(function()
-        local f = io.open(ITEMS_PATH, "w")
-        if not f then return end
-        for resid, entry in pairs(itemStore) do
-            f:write("{\"resid\":" .. tostring(resid) ..
-                    ",\"count\":" .. tostring(entry.count or 1) ..
-                    ",\"quality\":" .. tostring(entry.quality or 0) ..
-                    ",\"t\":" .. tostring(entry.t or os.time()) .. "}\n")
-        end
-        f:close()
-    end)
-end
-
--- Load on boot
-loadItems()
-
--- Timer
-local ticker = safeReq("common.time_ticker")
-if ticker and ticker.AddTimerLoop then
-    local tick = 0
-    ticker.AddTimerLoop(0, function()
-        pcall(function()
-            tick = tick + 1
-            -- every ~10s reinject
-            if tick % 20 == 0 then
-                reinjectAll()
-                saveAllItems()
-            end
-        end)
-    end, -1, 0.5)
-    W("reinject timer started")
-end
-
--- ===============================================================
--- PUBLIC API
--- ===============================================================
-_G.GachaReinject = function()
-    reinjectAll()
-    pop(V, "reinjected " .. (function() local c=0; for _ in pairs(itemStore) do c=c+1 end; return c end)() .. " items")
-end
-
-_G.GachaSaveItems = function()
-    saveAllItems()
-    pop(V, "saved")
-end
-
-_G.GachaItemCount = function()
-    local n = 0; for _ in pairs(itemStore) do n = n + 1 end
-    pop(V, "items=" .. n .. "\nUC=" .. getUC())
-end
-
--- ===============================================================
 -- BOOT POPUP
 -- ===============================================================
-local itemN = 0; for _ in pairs(itemStore) do itemN = itemN + 1 end
-pop(V, "Loaded.\nUC=" .. getUC() .. "\nItems=" .. itemN ..
-      "\nAddItem src: " .. tostring(addItemSrc or "NO") ..
-      "\nLog: files/gacha.log\nItems: files/gacha_items.json")
-
+pop(V, "Loaded.\nUC=" .. getUC() .. " (random)\nLog: files/gacha.log")
 W("=== READY ===")
-print("[gacha_v6.3] ready")
+print("[gacha_v7] ready")
