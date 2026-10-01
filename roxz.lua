@@ -1,17 +1,44 @@
 -- ===============================================================
--- gdump.lua v2 — real gacha event recon dumper
--- Output: /storage/emulated/0/Android/data/com.pubg.imobile/files/gdump.jsonl
--- Dumps: protocol handlers, activity modules, live IDs, reward pools, configs
+-- gdump_live.lua — lobby click-capture dumper
+-- Flow: match -> lobby -> auto-hook every draw method -> user clicks
+--       -> capture module state + args + rsp (real reward pool)
+-- Output: /storage/emulated/0/Android/data/com.pubg.imobile/files/gdump_live.jsonl
+-- Drop in mods/ — hotload picks it up. No restart after first load.
 -- ===============================================================
 
 local CFG = {
-    OUT = "/storage/emulated/0/Android/data/com.pubg.imobile/files/gdump.jsonl",
-    OUT_FALLBACK = "/sdcard/gdump.jsonl",
+    OUT = "/storage/emulated/0/Android/data/com.pubg.imobile/files/gdump_live.jsonl",
+    OUT_FALLBACK = "/sdcard/gdump_live.jsonl",
     POPUP = true,
-    MAX_STR = 300,
-    MAX_KEYS = 60,
-    MAX_DEPTH = 4,
-    DUMP_ITEM_TABLE = true,
+    LOBBY_POLL = 2.0,       -- check lobby state every 2s
+    MAX_STR = 400,
+    MAX_KEYS = 80,
+    MAX_DEPTH = 5,
+    -- module path fragments to hook (auto-discovered by scan)
+    PATTERNS = {
+        "lobby_activity",
+        "XSuit",
+        "tarot_card",
+        "scrap_gold",
+        "logic_luck",
+        "logic_draw",
+        "Godzilla",
+        "super_airdrop",
+        "luck_util",
+        "LuckcyOptionalTurntable",
+        "LukcyOptionalTurntable",
+    },
+    -- method name fragments that mean "draw/click"
+    DRAW_HINTS = {
+        "draw", "Draw", "DRAW",
+        "spin", "Spin",
+        "lottery", "Lottery",
+        "lotter", "Lotter",
+        "rotate", "Rotate",
+        "OnRotate", "OnRandom", "OnRecv", "OnBegin",
+        "DoDraw", "OneDraw", "TenDraw",
+        "SendDraw", "ReqDraw", "DoLottery",
+    },
 }
 
 -- ============ POPUP ============
@@ -98,7 +125,7 @@ local function emit(tag, evt, data)
         tag = tag, evt = evt, data = data or {},
     })
     bufN = bufN + 1
-    if bufN >= 20 then flush() end
+    if bufN >= 12 then flush() end
 end
 
 -- ============ HELPERS ============
@@ -110,275 +137,317 @@ local function safeReq(...)
     return nil
 end
 
--- ============ PASS 1: PROTOCOL HANDLERS ============
-local function dumpProtocol()
-    emit("scan", "protocol_start", {})
-    local seen = {}
-    local count = 0
-    for path, mod in pairs(package.loaded) do
-        if type(path) == "string" and path:find("client.network.Protocol.", 1, true) then
-            if not seen[path] then
-                seen[path] = true
-                count = count + 1
-                local sends, rsps, other = {}, {}, {}
-                if type(mod) == "table" then
-                    for k, v in pairs(mod) do
-                        if type(k) == "string" and type(v) == "function" then
-                            if k:find("^send_") then sends[#sends+1] = k
-                            elseif k:find("^on_") and k:find("_rsp") then rsps[#rsps+1] = k
-                            elseif not k:find("^_") then other[#other+1] = k end
-                        end
-                    end
-                end
-                table.sort(sends); table.sort(rsps); table.sort(other)
-                emit("protocol", "module", {
-                    path = path,
-                    sends = sends,
-                    rsps = rsps,
-                    other = other,
-                })
-            end
-        end
-    end
-    emit("scan", "protocol_done", { count = count })
-end
-
--- ============ PASS 2: ACTIVITY MODULES ============
-local function dumpActivities()
-    emit("scan", "activity_start", {})
-    local seen = {}
-    local count = 0
-    for path, mod in pairs(package.loaded) do
-        if type(path) == "string" and path:find("client.slua.logic.", 1, true) then
-            if not seen[path] and (path:find("activity") or path:find("lucky") 
-                or path:find("XSuit") or path:find("tarot") or path:find("supply")) then
-                seen[path] = true
-                count = count + 1
-                local scalars = {}
-                local hasDraw, hasCost, hasID = false, false, false
-                local activityId = nil
-                if type(mod) == "table" then
-                    for k, v in pairs(mod) do
-                        local tv = type(v)
-                        if tv == "number" or tv == "string" or tv == "boolean" then
-                            if k:find("^[a-z]") or k:find("^[A-Z]") then
-                                scalars[k] = v
-                            end
-                        end
-                        if tv == "function" then
-                            if k:find("[Dd]raw") or k:find("[Ss]pin") or k:find("[Ll]ottery") then hasDraw = true end
-                            if k:find("[Cc]ost") or k:find("[Pp]rice") then hasCost = true end
-                        end
-                        if k == "ActivityId" or k == "activity_id" or k == "actId" or k == "ActivityID" then
-                            hasID = true
-                            activityId = v
-                        end
-                    end
-                end
-                emit("activity", "module", {
-                    path = path,
-                    activity_id = activityId,
-                    has_draw_fn = hasDraw,
-                    has_cost_fn = hasCost,
-                    scalars = scalars,
-                })
-            end
-        end
-    end
-    emit("scan", "activity_done", { count = count })
-end
-
--- ============ PASS 3: LIVE ACTIVITY IDS + MODULE MANAGER ============
-local function dumpLive()
-    emit("scan", "live_start", {})
-
-    if ModuleManager and ModuleManager.LobbyModuleConfig then
-        local count = 0
-        for k, v in pairs(ModuleManager.LobbyModuleConfig) do
-            if type(k) == "string" then
-                count = count + 1
-                local loaded = nil
-                pcall(function() loaded = ModuleManager.GetModule(v) end)
-                emit("live", "lobby_module", {
-                    key = k,
-                    module_id = tostring(v),
-                    loaded = loaded ~= nil,
-                })
-            end
-        end
-        emit("live", "lobby_module_count", { n = count })
-    end
-
-    emit("scan", "live_done", {})
-end
-
--- ============ PASS 4: SUPPLY/STORE PAGE DATA ============
-local function dumpSupplyStore()
-    emit("scan", "supply_start", {})
+local function getStatus()
+    local GS = safeReq("GameStatus", "GameLua.GameStatus")
+    if not GS then return "unknown" end
+    local s = "unknown"
     pcall(function()
-        if not (ModuleManager and ModuleManager.GetModule and ModuleManager.LobbyModuleConfig) then return end
-        local sss = ModuleManager.GetModule(ModuleManager.LobbyModuleConfig.store_supply_switcher)
-        if not sss then return end
-
-        local supply = sss.GetSupplySystem and sss:GetSupplySystem()
-        if supply and supply.PageListPanel and supply.PageListPanel.itemDataList then
-            for i, v in pairs(supply.PageListPanel.itemDataList) do
-                emit("supply", "item", {
-                    idx = i,
-                    itemId = v.itemId,
-                    name = v.name or v.itemName,
-                    price = v.price,
-                    currency = v.currency,
-                    limit = v.limit or v.buyLimit,
-                })
-            end
-        end
-
-        local store = sss.GetStoreSystem and sss:GetStoreSystem()
-        if store and store.PageListPanel and store.PageListPanel.itemDataList then
-            for i, v in pairs(store.PageListPanel.itemDataList) do
-                emit("store", "item", {
-                    idx = i,
-                    itemId = v.itemId,
-                    name = v.name or v.itemName,
-                    price = v.price,
-                    currency = v.currency,
-                    limit = v.limit or v.buyLimit,
-                })
-            end
-        end
+        if GS.IsInLobbyOrMainCity and GS.IsInLobbyOrMainCity() then s = "lobby"
+        elseif GS.IsInFightingStatus and GS.IsInFightingStatus() then s = "match" end
     end)
-    emit("scan", "supply_done", {})
+    return s
 end
 
--- ============ PASS 5: REWARD POOLS ============
-local function dumpPools()
-    emit("scan", "pool_start", {})
-    local candidates = {
-        "client.slua.logic.lobby_activity.logic_luckyback_activity",
-        "client.slua.logic.lobby_activity.logic_luckyunback_activity",
-        "client.slua.logic.lobby_activity.logic_luckymulti_activity",
-        "client.slua.logic.lobby_activity.logic_luckmix_activity",
-        "client.slua.logic.XSuit.logic_xsuit_activity",
-        "client.slua.logic.tarot_card.logic_tarotcard_drawcard",
-        "client.slua.logic.store.logic_box_draw",
-        "client.slua.logic.store.logic_crate",
-        "client.slua.logic.supply.logic_supply",
+-- deep snapshot of a table (one level of safe traversal)
+local function snapshot(mod)
+    if type(mod) ~= "table" then return {} end
+    local out = {}
+    for k, v in pairs(mod) do
+        local tv = type(v)
+        if tv == "number" or tv == "string" or tv == "boolean" then
+            out[k] = v
+        elseif tv == "table" then
+            -- shallow: count + preview
+            local cnt, preview = 0, {}
+            for kk, vv in pairs(v) do
+                cnt = cnt + 1
+                if cnt <= 12 then
+                    if type(vv) == "table" then
+                        preview[tostring(kk)] = toJSON(vv, 3)
+                    else
+                        preview[tostring(kk)] = vv
+                    end
+                else break end
+            end
+            out[k] = { __count = cnt, __preview = preview }
+        end
+    end
+    return out
+end
+
+-- ============ HOOK REGISTRY ============
+local hooked = {}   -- [path .. "::" .. method] = true
+local installedMods = {}
+local installCount = 0
+
+local function isDrawMethod(name)
+    if type(name) ~= "string" then return false end
+    if name:find("^_") then return false end
+    if name == "ActivityId" or name == "ModuleId" then return false end
+    for _, hint in ipairs(CFG.DRAW_HINTS) do
+        if name:find(hint, 1, true) then return true end
+    end
+    return false
+end
+
+local function hookModule(path, mod)
+    if type(mod) ~= "table" then return end
+    for name, fn in pairs(mod) do
+        if type(name) == "string" and type(fn) == "function" and isDrawMethod(name) then
+            local key = path .. "::" .. name
+            if not hooked[key] then
+                hooked[key] = true
+                local orig = fn
+                mod[name] = function(...)
+                    -- PRE snapshot
+                    local pre = snapshot(mod)
+                    local args = { ... }
+                    local argsJson = toJSON(args, 1)
+
+                    -- call original
+                    local ok, r1, r2, r3 = pcall(orig, ...)
+
+                    -- POST snapshot
+                    local post = snapshot(mod)
+
+                    -- emit record
+                    emit("click", "draw", {
+                        path = path,
+                        method = name,
+                        args = argsJson,
+                        ok = ok,
+                        ret1 = r1,
+                        ret2 = r2,
+                        pre = pre,
+                        post = post,
+                    })
+                    flush()
+                    -- return original results
+                    if ok then return r1, r2, r3 end
+                    return r1
+                end
+            end
+        end
+    end
+    installedMods[path] = true
+    installCount = installCount + 1
+end
+
+-- ============ RSP HOOKS (capture server response = real pool) ============
+local rspHooked = {}
+local function hookRsp(handlerPath, rspName)
+    local H = safeReq(handlerPath)
+    if not H or type(H) ~= "table" then return end
+    if rspHooked[handlerPath .. "::" .. rspName] then return end
+    local orig = H[rspName]
+    if type(orig) ~= "function" then return end
+    rspHooked[handlerPath .. "::" .. rspName] = true
+    H[rspName] = function(...)
+        local args = { ... }
+        emit("rsp", rspName, {
+            handler = handlerPath,
+            args = toJSON(args, 1),
+        })
+        flush()
+        return orig(...)
+    end
+end
+
+local function installRspHooks()
+    local rspTargets = {
+        { "client.network.Protocol.StoreHandler", {
+            "on_buy_shop_by_id_rsp",
+            "on_buy_market_by_id_rsp",
+            "on_do_one_draw_by_activity_rsp",
+            "on_do_draw_discount_by_activity_rsp",
+            "on_do_biochemical_activity_one_draw_rsp",
+            "on_limited_discount_buy_rsp",
+            "on_newbie_chest_buy_rsp",
+            "on_buy_stage_chest_rsp",
+            "on_receive_guarantee_reward_rsp",
+            "on_get_market_chest_info_rsp",
+            "on_fetch_chest_result_rsp",
+            "on_get_market_buy_info_rsp_v3",
+            "on_get_shop_info_rsp",
+            "on_market_buy_chest_item_notify",
+            "on_please_direct_buy",
+            "on_notice_shop_guarantee_reward",
+            "on_buy_shop_by_id_ntf",
+        }},
+        { "client.network.Protocol.LuckybackHandler", {
+            "on_do_one_draw_back_by_activity_rsp",
+            "on_get_lucky_draw_back_activity_rsp",
+            "on_get_lucky_draw_back_voucher_rsp",
+            "on_get_lucky_draw_collect_award_rsp",
+            "on_get_sum_draw_award_by_activity_rsp",
+            "on_do_exchange_by_activity_id_rsp",
+            "on_get_lucky_draw_back_redpoint_rsp",
+        }},
+        { "client.network.Protocol.LuckySpecialHandler", {
+            "on_do_draw_act_rsp",
+            "on_do_draw_discount_rsp",
+            "on_get_draw_act_info_rsp",
+            "on_get_draw_sum_reward_rsp",
+            "on_get_collected_reward_rsp",
+            "on_get_extra_reward_rsp",
+        }},
+        { "client.network.Protocol.XSuitHandler", {
+            "on_draw_gold_dress_rsp",
+            "on_get_accumulate_pool_reward_rsp",
+            "on_get_wish_pool_rsp",
+            "on_get_gold_dress_activity_rsp",
+            "on_gold_dress_get_collect_reward_rsp",
+            "on_open_gold_dress_branch_box_rsp",
+            "on_set_wish_pool_id_rsp",
+        }},
+        { "client.network.Protocol.SupplyOptionalHandler", {
+            "on_get_role_custom_chest_info_rsp",
+            "on_role_chest_custom_buy_rsp",
+            "on_role_chest_exchange_temp_item_rsp",
+            "on_get_role_exchange_history_info_rsp",
+        }},
+        { "client.network.Protocol.ActivityHandler", {
+            "on_take_activity_award_rsp",
+            "on_batch_take_activity_award_rsp",
+            "on_get_activity_reward_rsp",
+            "on_get_activity_one_rsp",
+            "on_get_activity_list_rsp",
+            "on_get_activity_map_by_id_rsp",
+            "on_get_ams_lucky_draw_unback_rsp",
+        }},
+        { "client.network.Protocol.DropBoxHandler", {
+            "on_get_content_by_chestids_rsp",
+            "on_get_content_by_dropids_rsp",
+            "on_get_realtime_probability_rsp",
+        }},
     }
-    for _, p in ipairs(candidates) do
-        local m = safeReq(p)
-        if m and type(m) == "table" then
-            for k, v in pairs(m) do
-                if type(v) == "table" and (k:find("reward") or k:find("drop") 
-                    or k:find("pool") or k:find("award") or k:find("draw_list")) then
-                    local preview = {}
-                    local n = 0
-                    for i, item in pairs(v) do
-                        n = n + 1
-                        if n > 30 then break end
-                        if type(item) == "table" then
-                            preview[#preview+1] = {
-                                id = item.resid or item.res_id or item.itemid or item.id,
-                                count = item.count or item.item_count or item.num,
-                                weight = item.weight or item.rate or item.prob,
-                            }
-                        end
-                    end
-                    if #preview > 0 then
-                        emit("pool", p, { field = k, items = preview, total = #v })
-                    end
-                end
-            end
+    for _, entry in ipairs(rspTargets) do
+        for _, name in ipairs(entry[2]) do
+            pcall(hookRsp, entry[1], name)
         end
     end
-    emit("scan", "pool_done", {})
 end
 
--- ============ PASS 6: CDataTable CONFIGS ============
-local function dumpConfigs()
-    if not CFG.DUMP_ITEM_TABLE then return end
-    emit("scan", "cfg_start", {})
-    local CD = _G.CDataTable or safeReq("common.CDataTable")
-    if not CD or not CD.GetTableData then
-        emit("scan", "cfg_skip", { msg = "no CDataTable" })
-        return
-    end
-
-    -- Item table: probe range
-    local itemCount = 0
-    for i = 1, 500 do
-        local cfg = nil
-        pcall(function() cfg = CD.GetTableData("Item", i) end)
-        if cfg then
-            itemCount = itemCount + 1
-            emit("cfg", "item", {
-                id = i,
-                name = cfg.Name or cfg.name,
-                type = cfg.Type or cfg.type,
-                quality = cfg.Quality or cfg.quality,
-                icon = cfg.Icon or cfg.icon,
-            })
+-- ============ AUTO-DISCOVER ACTIVITY MODULES ============
+local function discoverAndHook()
+    local found = 0
+    for path, mod in pairs(package.loaded) do
+        if type(path) == "string" then
+            local matched = false
+            for _, pat in ipairs(CFG.PATTERNS) do
+                if path:find(pat, 1, true) then matched = true; break end
+            end
+            if matched and type(mod) == "table" then
+                hookModule(path, mod)
+                found = found + 1
+            end
         end
     end
-    emit("scan", "cfg_item_count", { n = itemCount })
+    return found
+end
 
-    -- try common crate tables
-    local tables = { "SupplyBox", "Crate", "Chest", "DrawPool", "LotteryPool", "ActivityConfig", "Goods" }
-    for _, tbl in ipairs(tables) do
-        pcall(function()
-            if CD.GetTable then
-                local data = CD.GetTable(tbl)
-                if data and type(data) == "table" then
-                    local n = 0
-                    for id, cfg in pairs(data) do
-                        n = n + 1
-                        if n > 40 then break end
-                        emit("cfg", tbl, { id = id, cfg = cfg })
-                    end
-                end
-            end
-        end)
+-- ============ LOBBY STATE MACHINE ============
+local S = {
+    lastStatus = "",
+    lobbyDetected = false,
+    hooksInstalled = false,
+    installTick = 0,
+}
+
+local function onLobbyEnter()
+    if S.hooksInstalled then return end
+    emit("state", "lobby_enter", { ts = os.date("%Y-%m-%d %H:%M:%S") })
+    local n = discoverAndHook()
+    installRspHooks()
+    S.hooksInstalled = true
+    emit("state", "hooks_installed", { modules = n, rspCount = (function() local c=0 for _ in pairs(rspHooked) do c=c+1 end return c end)() })
+    flush()
+    if CFG.POPUP then
+        POPUP("GDUMP LIVE", "Hooks installed.\nModules: " .. n .. "\nNow click every spin/draw.")
     end
-    emit("scan", "cfg_done", {})
+end
+
+local function onMatchEnter()
+    if S.hooksInstalled then
+        emit("state", "match_enter", { note = "hooks stay installed" })
+        flush()
+    end
 end
 
 -- ============ BOOT ============
 flush()
-emit("boot", "start", { out = CFG.OUT, ts = os.date("%Y-%m-%d %H:%M:%S"), v = "gdump v2" })
+emit("boot", "start", {
+    out = CFG.OUT,
+    ts = os.date("%Y-%m-%d %H:%M:%S"),
+    v = "gdump_live v1",
+})
 flush()
 
-if CFG.POPUP then POPUP("GDUMP", "Recon running...\n" .. CFG.OUT) end
+if CFG.POPUP then
+    POPUP("GDUMP LIVE", "Waiting for lobby...\nClick each spin/draw.")
+end
 
-pcall(dumpProtocol)
-pcall(dumpActivities)
-pcall(dumpLive)
-pcall(dumpSupplyStore)
-pcall(dumpPools)
-pcall(dumpConfigs)
+-- ============ LOOP ============
+local ticker = safeReq("common.time_ticker")
+if not ticker or not ticker.AddTimerLoop then
+    emit("boot", "err", { msg = "no time_ticker" })
+    flush()
+    POPUP("GDUMP LIVE", "No time_ticker")
+    return
+end
 
-emit("boot", "done", { ok = stats.ok, fail = stats.fail, ts = os.date("%Y-%m-%d %H:%M:%S") })
+ticker.AddTimerLoop(0, function()
+    pcall(function()
+        local st = getStatus()
+        if st ~= S.lastStatus then
+            emit("state", "change", { from = S.lastStatus, to = st })
+            S.lastStatus = st
+            if st == "lobby" then
+                S.lobbyDetected = true
+                onLobbyEnter()
+            elseif st == "match" then
+                onMatchEnter()
+            end
+        end
+        -- Re-scan every 10 ticks (catch late-loaded modules)
+        if S.lobbyDetected then
+            S.installTick = S.installTick + 1
+            if S.installTick % 10 == 0 then
+                local n = discoverAndHook()
+                if n > 0 then
+                    emit("state", "rescan", { modules = n })
+                    flush()
+                end
+            end
+        end
+    end)
+end, -1, CFG.LOBBY_POLL)
+
+emit("boot", "ready", { poll = CFG.LOBBY_POLL })
 flush()
 
 -- ============ PUBLIC API ============
-_G.GDRescan = function()
-    emit("manual", "rescan", { ts = os.date("%Y-%m-%d %H:%M:%S") })
-    pcall(dumpProtocol)
-    pcall(dumpActivities)
-    pcall(dumpLive)
-    pcall(dumpSupplyStore)
-    pcall(dumpPools)
-    pcall(dumpConfigs)
-    flush()
-    POPUP("GDUMP", "Rescan done. ok=" .. stats.ok .. " fail=" .. stats.fail)
-end
+_G.GDLive = {
+    forceInstall = function()
+        local n = discoverAndHook()
+        installRspHooks()
+        POPUP("GDLIVE", "Force install: " .. n .. " modules")
+    end,
+    status = function()
+        local c = 0
+        for _ in pairs(hooked) do c = c + 1 end
+        local rc = 0
+        for _ in pairs(rspHooked) do rc = rc + 1 end
+        POPUP("GDLIVE", string.format("hooks=%d rsp=%d\nmods=%d ok=%d fail=%d",
+            c, rc, installCount, stats.ok, stats.fail))
+    end,
+    dumpSnapshot = function(path)
+        local m = safeReq(path)
+        if m then
+            emit("manual", "snapshot", { path = path, data = snapshot(m) })
+            flush()
+        end
+    end,
+}
 
-_G.GDStatus = function()
-    emit("manual", "status", { ok = stats.ok, fail = stats.fail })
-    flush()
-    POPUP("GDUMP", "ok=" .. stats.ok .. " fail=" .. stats.fail .. "\n" .. CFG.OUT)
-end
-
-print("[GD2] done — file=" .. CFG.OUT)
-if CFG.POPUP then
-    POPUP("GDUMP OK", "Done!\nok=" .. stats.ok .. " fail=" .. stats.fail .. "\n\n" .. CFG.OUT)
-end
+print("[GDLIVE] ready — out=" .. CFG.OUT)
