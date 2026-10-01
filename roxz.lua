@@ -1,31 +1,17 @@
 -- ===============================================================
--- hotload.lua v2 — hot-reload loader, io.popen-free
--- Enumerates mods via: manifest file, os.execute+redirect, lfs,
--- hardcoded candidates. Runs every .lua found. Re-runs on change.
+-- gdump.lua v2 — real gacha event recon dumper
+-- Output: /storage/emulated/0/Android/data/com.pubg.imobile/files/gdump.jsonl
+-- Dumps: protocol handlers, activity modules, live IDs, reward pools, configs
 -- ===============================================================
 
 local CFG = {
-    MODS_DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/mods/",
-    LOG = "/storage/emulated/0/Android/data/com.pubg.imobile/files/mods/hotload.log",
-    MANIFEST = "/storage/emulated/0/Android/data/com.pubg.imobile/files/mods/mods.txt",
-    SCAN_INTERVAL = 3,
-    POPUP = false,
-    MAX_FILE_SIZE = 512 * 1024,
-    -- Filenames to try even if enumeration fails. Add yours here.
-    KNOWN = {
-        "hotload.lua",
-        "gdump.lua",
-        "mdump.lua",
-        "pdump.lua",
-        "mod.lua",
-        "main.lua",
-        "init.lua",
-        "loader.lua",
-        "script.lua",
-        "hack.lua",
-        "cheat.lua",
-        "dumper.lua",
-    },
+    OUT = "/storage/emulated/0/Android/data/com.pubg.imobile/files/gdump.jsonl",
+    OUT_FALLBACK = "/sdcard/gdump.jsonl",
+    POPUP = true,
+    MAX_STR = 300,
+    MAX_KEYS = 60,
+    MAX_DEPTH = 4,
+    DUMP_ITEM_TABLE = true,
 }
 
 -- ============ POPUP ============
@@ -37,222 +23,85 @@ local function POPUP(title, msg)
     end)
 end
 
--- ============ LOG ============
-local logN = 0
-local function logLine(msg)
-    logN = logN + 1
-    local line = string.format("[%s] %s", os.date("%H:%M:%S"), msg)
+-- ============ JSON ============
+local function esc(s)
+    s = tostring(s)
+    return (s:gsub("\\","\\\\"):gsub("\"","\\\""):gsub("\n","\\n"):gsub("\r","\\r"):gsub("\t","\\t"))
+end
+
+local function toJSON(v, d)
+    d = d or 0
+    if d > CFG.MAX_DEPTH then return "\"<deep>\"" end
+    local t = type(v)
+    if t == "nil" then return "null" end
+    if t == "boolean" then return v and "true" or "false" end
+    if t == "number" then
+        if v ~= v or v == math.huge or v == -math.huge then return "null" end
+        return tostring(v)
+    end
+    if t == "string" then
+        if #v > CFG.MAX_STR then v = v:sub(1, CFG.MAX_STR) .. "..." end
+        return "\"" .. esc(v) .. "\""
+    end
+    if t == "userdata" then return "\"<ud>\"" end
+    if t == "function" then return "\"<fn>\"" end
+    if t == "table" then
+        local n, isArr = 0, true
+        for k in pairs(v) do
+            n = n + 1
+            if type(k) ~= "number" then isArr = false; break end
+        end
+        if isArr and n > 0 then
+            local p = {}
+            for i = 1, math.min(#v, CFG.MAX_KEYS) do p[#p+1] = toJSON(v[i], d+1) end
+            if #v > CFG.MAX_KEYS then p[#p+1] = "\"<...>\"" end
+            return "[" .. table.concat(p, ",") .. "]"
+        end
+        local p = {}
+        for k, vv in pairs(v) do
+            p[#p+1] = "\"" .. esc(k) .. "\":" .. toJSON(vv, d+1)
+            if #p >= CFG.MAX_KEYS then p[#p+1] = "\"__trunc\":true"; break end
+        end
+        return "{" .. table.concat(p, ",") .. "}"
+    end
+    return "\"<?>\""
+end
+
+-- ============ WRITE ============
+local buf, bufN = {}, 0
+local stats = { ok = 0, fail = 0 }
+
+local function rawWrite(payload)
+    local wrote = false
     pcall(function()
-        local f = io.open(CFG.LOG, "a")
-        if f then f:write(line .. "\n"); f:close() end
+        local f = io.open(CFG.OUT, "a")
+        if f then f:write(payload); f:close(); wrote = true end
     end)
-    print("[HL] " .. line)
-end
-
--- ============ ENUMERATION STRATEGIES ============
-
--- Strategy A: manifest file mods.txt (one filename per line)
-local function enumManifest()
-    local out = {}
-    local f = io.open(CFG.MANIFEST, "r")
-    if not f then return out end
-    for line in f:lines() do
-        line = line:gsub("%s+$", ""):gsub("^%s+", "")
-        if line ~= "" and line:sub(1,1) ~= "#" then
-            out[#out+1] = CFG.MODS_DIR .. line
-        end
+    if not wrote then
+        pcall(function()
+            local f = io.open(CFG.OUT_FALLBACK, "a")
+            if f then f:write(payload); f:close(); wrote = true end
+        end)
     end
-    f:close()
-    return out
+    if wrote then stats.ok = stats.ok + 1 else stats.fail = stats.fail + 1 end
 end
 
--- Strategy B: os.execute + redirect to temp file, read it
-local function enumShellRedirect()
-    local out = {}
-    local tmp = CFG.MODS_DIR .. "_ls_tmp.txt"
-    -- Try several shell variants
-    local cmds = {
-        "ls -1 '" .. CFG.MODS_DIR .. "' 2>/dev/null > '" .. tmp .. "'",
-        "ls '" .. CFG.MODS_DIR .. "' > '" .. tmp .. "' 2>&1",
-        "find '" .. CFG.MODS_DIR .. "' -maxdepth 1 -name '*.lua' > '" .. tmp .. "' 2>&1",
-    }
-    for _, cmd in ipairs(cmds) do
-        pcall(function() os.execute(cmd) end)
-        local f = io.open(tmp, "r")
-        if f then
-            for line in f:lines() do
-                local name = line:match("([^/]+)$")
-                if name and name:find("%.lua$") then
-                    out[#out+1] = CFG.MODS_DIR .. name
-                end
-            end
-            f:close()
-            if #out > 0 then
-                pcall(function() os.remove(tmp) end)
-                return out
-            end
-        end
-    end
-    pcall(function() os.remove(tmp) end)
-    return out
+local function flush()
+    if bufN == 0 then return end
+    rawWrite(table.concat(buf, "\n") .. "\n")
+    buf, bufN = {}, 0
 end
 
--- Strategy C: io.popen (still try, some builds have it)
-local function enumPopen()
-    local out = {}
-    pcall(function()
-        local p = io.popen("ls -1 '" .. CFG.MODS_DIR .. "' 2>/dev/null")
-        if p then
-            for line in p:lines() do
-                local name = line:match("([^/]+)$")
-                if name and name:find("%.lua$") then
-                    out[#out+1] = CFG.MODS_DIR .. name
-                end
-            end
-            p:close()
-        end
-    end)
-    return out
+local function emit(tag, evt, data)
+    buf[#buf+1] = toJSON({
+        t = os.date("%Y-%m-%dT%H:%M:%S"),
+        tag = tag, evt = evt, data = data or {},
+    })
+    bufN = bufN + 1
+    if bufN >= 20 then flush() end
 end
 
--- Strategy D: lfs (LuaFileSystem) if available
-local function enumLFS()
-    local out = {}
-    pcall(function()
-        local ok, lfs = pcall(require, "lfs")
-        if not ok or not lfs then return end
-        for file in lfs.dir(CFG.MODS_DIR) do
-            if file ~= "." and file ~= ".." and file:find("%.lua$") then
-                out[#out+1] = CFG.MODS_DIR .. file
-            end
-        end
-    end)
-    return out
-end
-
--- Strategy E: hardcoded candidate names
-local function enumKnown()
-    local out = {}
-    for _, name in ipairs(CFG.KNOWN) do
-        local path = CFG.MODS_DIR .. name
-        local f = io.open(path, "r")
-        if f then
-            f:close()
-            out[#out+1] = path
-        end
-    end
-    return out
-end
-
--- Dedupe
-local function dedupe(list)
-    local seen, out = {}, {}
-    for _, p in ipairs(list) do
-        if not seen[p] then
-            seen[p] = true
-            out[#out+1] = p
-        end
-    end
-    return out
-end
-
--- Master enumerator
-local function listModFiles()
-    local a = enumManifest()
-    if #a > 0 then return dedupe(a), "manifest" end
-    local b = enumShellRedirect()
-    if #b > 0 then return dedupe(b), "shell" end
-    local c = enumPopen()
-    if #c > 0 then return dedupe(c), "popen" end
-    local d = enumLFS()
-    if #d > 0 then return dedupe(d), "lfs" end
-    local e = enumKnown()
-    return dedupe(e), "known"
-end
-
--- ============ FILE HASH ============
-local function fileHash(path)
-    local f = io.open(path, "rb")
-    if not f then return nil end
-    local data = f:read("*a") or ""
-    f:close()
-    if #data == 0 then return "empty" end
-    local sum = 0
-    for i = 1, math.min(#data, 4096) do
-        sum = (sum + data:byte(i)) % 1000000007
-    end
-    return string.format("%d|%d|%s|%s", #data, sum, data:sub(1, 32), data:sub(-32))
-end
-
--- ============ EXEC ============
-local function execFile(path)
-    local f = io.open(path, "r")
-    if not f then return false, "open failed" end
-    local src = f:read("*a") or ""
-    f:close()
-    if #src == 0 then return false, "empty" end
-    if #src > CFG.MAX_FILE_SIZE then return false, "too big" end
-    src = src:gsub("^\239\187\191", "")
-    local fn, err
-    if loadstring then fn, err = loadstring(src, "@" .. path)
-    elseif load then fn, err = load(src, "@" .. path, "t") end
-    if not fn then return false, "compile: " .. tostring(err) end
-    local ok, res = pcall(fn)
-    if not ok then return false, "run: " .. tostring(res) end
-    return true, res
-end
-
--- ============ STATE ============
-local fileState = {}
-local loadCount, failCount = 0, 0
-local lastStrategy = "?"
-
-local function scanOnce()
-    local files, strat = listModFiles()
-    lastStrategy = strat
-    if strat ~= "manifest" and #files == 0 then
-        -- Nothing found on first scan — log once
-        if logN < 5 then logLine("WARN: 0 files found. strategy=" .. strat) end
-    end
-    for _, path in ipairs(files) do
-        local h = fileHash(path)
-        if h and fileState[path] ~= h then
-            fileState[path] = h
-            local name = path:match("([^/]+)$") or path
-            local ok, err = execFile(path)
-            if ok then
-                loadCount = loadCount + 1
-                logLine("LOADED " .. name .. " (via " .. strat .. ")")
-                if CFG.POPUP then POPUP("HOTLOAD", "Loaded: " .. name) end
-            else
-                failCount = failCount + 1
-                logLine("FAILED " .. name .. " — " .. tostring(err))
-                if CFG.POPUP then POPUP("HOTLOAD FAIL", name .. "\n" .. tostring(err)) end
-            end
-        end
-    end
-end
-
--- ============ BOOT ============
-logLine("=== hotload v2 boot ===")
-logLine("MODS_DIR=" .. CFG.MODS_DIR)
-
--- Sanity: can we even see the dir?
-do
-    local probe = CFG.MODS_DIR .. ".probe"
-    local f = io.open(probe, "w")
-    if f then f:write("ok"); f:close()
-        logLine("dir writable: yes")
-        pcall(function() os.remove(probe) end)
-    else
-        logLine("dir writable: NO — path wrong or perms")
-    end
-end
-
-scanOnce()
-logLine(string.format("initial: loaded=%d fail=%d strategy=%s", loadCount, failCount, lastStrategy))
-
--- ============ LOOP ============
+-- ============ HELPERS ============
 local function safeReq(...)
     for _, p in ipairs({...}) do
         local ok, m = pcall(require, p)
@@ -261,41 +110,275 @@ local function safeReq(...)
     return nil
 end
 
-local ticker = safeReq("common.time_ticker")
-if not ticker or not ticker.AddTimerLoop then
-    logLine("FATAL: no time_ticker")
-    if CFG.POPUP then POPUP("HOTLOAD", "No time_ticker") end
-    return
+-- ============ PASS 1: PROTOCOL HANDLERS ============
+local function dumpProtocol()
+    emit("scan", "protocol_start", {})
+    local seen = {}
+    local count = 0
+    for path, mod in pairs(package.loaded) do
+        if type(path) == "string" and path:find("client.network.Protocol.", 1, true) then
+            if not seen[path] then
+                seen[path] = true
+                count = count + 1
+                local sends, rsps, other = {}, {}, {}
+                if type(mod) == "table" then
+                    for k, v in pairs(mod) do
+                        if type(k) == "string" and type(v) == "function" then
+                            if k:find("^send_") then sends[#sends+1] = k
+                            elseif k:find("^on_") and k:find("_rsp") then rsps[#rsps+1] = k
+                            elseif not k:find("^_") then other[#other+1] = k end
+                        end
+                    end
+                end
+                table.sort(sends); table.sort(rsps); table.sort(other)
+                emit("protocol", "module", {
+                    path = path,
+                    sends = sends,
+                    rsps = rsps,
+                    other = other,
+                })
+            end
+        end
+    end
+    emit("scan", "protocol_done", { count = count })
 end
 
-ticker.AddTimerLoop(0, function()
-    pcall(scanOnce)
-end, -1, CFG.SCAN_INTERVAL)
+-- ============ PASS 2: ACTIVITY MODULES ============
+local function dumpActivities()
+    emit("scan", "activity_start", {})
+    local seen = {}
+    local count = 0
+    for path, mod in pairs(package.loaded) do
+        if type(path) == "string" and path:find("client.slua.logic.", 1, true) then
+            if not seen[path] and (path:find("activity") or path:find("lucky") 
+                or path:find("XSuit") or path:find("tarot") or path:find("supply")) then
+                seen[path] = true
+                count = count + 1
+                local scalars = {}
+                local hasDraw, hasCost, hasID = false, false, false
+                local activityId = nil
+                if type(mod) == "table" then
+                    for k, v in pairs(mod) do
+                        local tv = type(v)
+                        if tv == "number" or tv == "string" or tv == "boolean" then
+                            if k:find("^[a-z]") or k:find("^[A-Z]") then
+                                scalars[k] = v
+                            end
+                        end
+                        if tv == "function" then
+                            if k:find("[Dd]raw") or k:find("[Ss]pin") or k:find("[Ll]ottery") then hasDraw = true end
+                            if k:find("[Cc]ost") or k:find("[Pp]rice") then hasCost = true end
+                        end
+                        if k == "ActivityId" or k == "activity_id" or k == "actId" or k == "ActivityID" then
+                            hasID = true
+                            activityId = v
+                        end
+                    end
+                end
+                emit("activity", "module", {
+                    path = path,
+                    activity_id = activityId,
+                    has_draw_fn = hasDraw,
+                    has_cost_fn = hasCost,
+                    scalars = scalars,
+                })
+            end
+        end
+    end
+    emit("scan", "activity_done", { count = count })
+end
 
-logLine("=== hotload v2 active ===")
+-- ============ PASS 3: LIVE ACTIVITY IDS + MODULE MANAGER ============
+local function dumpLive()
+    emit("scan", "live_start", {})
+
+    if ModuleManager and ModuleManager.LobbyModuleConfig then
+        local count = 0
+        for k, v in pairs(ModuleManager.LobbyModuleConfig) do
+            if type(k) == "string" then
+                count = count + 1
+                local loaded = nil
+                pcall(function() loaded = ModuleManager.GetModule(v) end)
+                emit("live", "lobby_module", {
+                    key = k,
+                    module_id = tostring(v),
+                    loaded = loaded ~= nil,
+                })
+            end
+        end
+        emit("live", "lobby_module_count", { n = count })
+    end
+
+    emit("scan", "live_done", {})
+end
+
+-- ============ PASS 4: SUPPLY/STORE PAGE DATA ============
+local function dumpSupplyStore()
+    emit("scan", "supply_start", {})
+    pcall(function()
+        if not (ModuleManager and ModuleManager.GetModule and ModuleManager.LobbyModuleConfig) then return end
+        local sss = ModuleManager.GetModule(ModuleManager.LobbyModuleConfig.store_supply_switcher)
+        if not sss then return end
+
+        local supply = sss.GetSupplySystem and sss:GetSupplySystem()
+        if supply and supply.PageListPanel and supply.PageListPanel.itemDataList then
+            for i, v in pairs(supply.PageListPanel.itemDataList) do
+                emit("supply", "item", {
+                    idx = i,
+                    itemId = v.itemId,
+                    name = v.name or v.itemName,
+                    price = v.price,
+                    currency = v.currency,
+                    limit = v.limit or v.buyLimit,
+                })
+            end
+        end
+
+        local store = sss.GetStoreSystem and sss:GetStoreSystem()
+        if store and store.PageListPanel and store.PageListPanel.itemDataList then
+            for i, v in pairs(store.PageListPanel.itemDataList) do
+                emit("store", "item", {
+                    idx = i,
+                    itemId = v.itemId,
+                    name = v.name or v.itemName,
+                    price = v.price,
+                    currency = v.currency,
+                    limit = v.limit or v.buyLimit,
+                })
+            end
+        end
+    end)
+    emit("scan", "supply_done", {})
+end
+
+-- ============ PASS 5: REWARD POOLS ============
+local function dumpPools()
+    emit("scan", "pool_start", {})
+    local candidates = {
+        "client.slua.logic.lobby_activity.logic_luckyback_activity",
+        "client.slua.logic.lobby_activity.logic_luckyunback_activity",
+        "client.slua.logic.lobby_activity.logic_luckymulti_activity",
+        "client.slua.logic.lobby_activity.logic_luckmix_activity",
+        "client.slua.logic.XSuit.logic_xsuit_activity",
+        "client.slua.logic.tarot_card.logic_tarotcard_drawcard",
+        "client.slua.logic.store.logic_box_draw",
+        "client.slua.logic.store.logic_crate",
+        "client.slua.logic.supply.logic_supply",
+    }
+    for _, p in ipairs(candidates) do
+        local m = safeReq(p)
+        if m and type(m) == "table" then
+            for k, v in pairs(m) do
+                if type(v) == "table" and (k:find("reward") or k:find("drop") 
+                    or k:find("pool") or k:find("award") or k:find("draw_list")) then
+                    local preview = {}
+                    local n = 0
+                    for i, item in pairs(v) do
+                        n = n + 1
+                        if n > 30 then break end
+                        if type(item) == "table" then
+                            preview[#preview+1] = {
+                                id = item.resid or item.res_id or item.itemid or item.id,
+                                count = item.count or item.item_count or item.num,
+                                weight = item.weight or item.rate or item.prob,
+                            }
+                        end
+                    end
+                    if #preview > 0 then
+                        emit("pool", p, { field = k, items = preview, total = #v })
+                    end
+                end
+            end
+        end
+    end
+    emit("scan", "pool_done", {})
+end
+
+-- ============ PASS 6: CDataTable CONFIGS ============
+local function dumpConfigs()
+    if not CFG.DUMP_ITEM_TABLE then return end
+    emit("scan", "cfg_start", {})
+    local CD = _G.CDataTable or safeReq("common.CDataTable")
+    if not CD or not CD.GetTableData then
+        emit("scan", "cfg_skip", { msg = "no CDataTable" })
+        return
+    end
+
+    -- Item table: probe range
+    local itemCount = 0
+    for i = 1, 500 do
+        local cfg = nil
+        pcall(function() cfg = CD.GetTableData("Item", i) end)
+        if cfg then
+            itemCount = itemCount + 1
+            emit("cfg", "item", {
+                id = i,
+                name = cfg.Name or cfg.name,
+                type = cfg.Type or cfg.type,
+                quality = cfg.Quality or cfg.quality,
+                icon = cfg.Icon or cfg.icon,
+            })
+        end
+    end
+    emit("scan", "cfg_item_count", { n = itemCount })
+
+    -- try common crate tables
+    local tables = { "SupplyBox", "Crate", "Chest", "DrawPool", "LotteryPool", "ActivityConfig", "Goods" }
+    for _, tbl in ipairs(tables) do
+        pcall(function()
+            if CD.GetTable then
+                local data = CD.GetTable(tbl)
+                if data and type(data) == "table" then
+                    local n = 0
+                    for id, cfg in pairs(data) do
+                        n = n + 1
+                        if n > 40 then break end
+                        emit("cfg", tbl, { id = id, cfg = cfg })
+                    end
+                end
+            end
+        end)
+    end
+    emit("scan", "cfg_done", {})
+end
+
+-- ============ BOOT ============
+flush()
+emit("boot", "start", { out = CFG.OUT, ts = os.date("%Y-%m-%d %H:%M:%S"), v = "gdump v2" })
+flush()
+
+if CFG.POPUP then POPUP("GDUMP", "Recon running...\n" .. CFG.OUT) end
+
+pcall(dumpProtocol)
+pcall(dumpActivities)
+pcall(dumpLive)
+pcall(dumpSupplyStore)
+pcall(dumpPools)
+pcall(dumpConfigs)
+
+emit("boot", "done", { ok = stats.ok, fail = stats.fail, ts = os.date("%Y-%m-%d %H:%M:%S") })
+flush()
 
 -- ============ PUBLIC API ============
-_G.HotloadStatus = function()
-    local n = 0
-    for _ in pairs(fileState) do n = n + 1 end
-    local msg = string.format("loaded=%d fail=%d\nfiles=%d\nstrategy=%s\n%s",
-        loadCount, failCount, n, lastStrategy, CFG.MODS_DIR)
-    POPUP("HOTLOAD", msg)
+_G.GDRescan = function()
+    emit("manual", "rescan", { ts = os.date("%Y-%m-%d %H:%M:%S") })
+    pcall(dumpProtocol)
+    pcall(dumpActivities)
+    pcall(dumpLive)
+    pcall(dumpSupplyStore)
+    pcall(dumpPools)
+    pcall(dumpConfigs)
+    flush()
+    POPUP("GDUMP", "Rescan done. ok=" .. stats.ok .. " fail=" .. stats.fail)
 end
 
-_G.HotloadRescan = function()
-    fileState = {}
-    scanOnce()
-    POPUP("HOTLOAD", "Rescan: loaded=" .. loadCount .. " strat=" .. lastStrategy)
+_G.GDStatus = function()
+    emit("manual", "status", { ok = stats.ok, fail = stats.fail })
+    flush()
+    POPUP("GDUMP", "ok=" .. stats.ok .. " fail=" .. stats.fail .. "\n" .. CFG.OUT)
 end
 
--- Convenience: write mods.txt manifest from Lua
-_G.HotloadWriteManifest = function(names)
-    local f = io.open(CFG.MANIFEST, "w")
-    if not f then return false end
-    for _, n in ipairs(names or {}) do
-        f:write(n .. "\n")
-    end
-    f:close()
-    return true
+print("[GD2] done — file=" .. CFG.OUT)
+if CFG.POPUP then
+    POPUP("GDUMP OK", "Done!\nok=" .. stats.ok .. " fail=" .. stats.fail .. "\n\n" .. CFG.OUT)
 end
