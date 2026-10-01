@@ -1,165 +1,159 @@
--- ═══════════════════════════════════════════════════════════════════
--- loader.lua — auto-scans mod folder + runs every .lua file
--- Drop-in. Any .lua in the folder loads automatically.
--- Logs success/fail per file to loader_log.txt
--- ═══════════════════════════════════════════════════════════════════
+-- ===============================================================
+-- hotload.lua — hot-reload loader for gacha mods
+-- Watches mods/ folder. Any .lua file added/changed runs instantly.
+-- No game restart needed. Idempotent hooks re-apply cleanly.
+-- ===============================================================
 
-if _G._ModLoader_Loaded then return end
-_G._ModLoader_Loaded = true
-
--- ─── PATHS ─────────────────────────────────────────────────────────
-local SAVE_DIRS = {
-    "/storage/emulated/0/Android/data/com.pubg.imobile/files/",
-    "/storage/emulated/0/Android/data/com.pubg.krmobile/files/",
-    "/storage/emulated/0/Android/data/com.vng.pubgmobile/files/",
-    "/storage/emulated/0/Android/data/com.rekoo.pubgm/files/",
+local CFG = {
+    MODS_DIR = "/storage/emulated/0/Android/data/com.pubg.imobile/files/mods/",
+    SCAN_INTERVAL = 3,      -- seconds between scans
+    POPUP = false,          -- change to true for load confirmation
+    MAX_FILE_SIZE = 512 * 1024,  -- skip > 512KB (sanity)
 }
-local function getSaveDir()
-    local i
-    for i = 1, #SAVE_DIRS do
-        local f = io.open(SAVE_DIRS[i] .. "config.ini", "r")
-        if f then f:close(); return SAVE_DIRS[i] end
-    end
-    return SAVE_DIRS[1]
-end
 
--- ★ Folder jahan mods hain — yahan apne mod .lua files daalo
-local MOD_DIR = getSaveDir() .. "mods/"
-local LOADER_LOG = getSaveDir() .. "loader_log.txt"
-
--- Create mods folder if missing
-pcall(function()
-    local testf = io.open(MOD_DIR .. "test.txt", "w")
-    if testf then testf:close() end
-end)
-
--- ─── LOG ───────────────────────────────────────────────────────────
-local logBuf = {}
-local function L(msg)
-    logBuf[#logBuf + 1] = "[" .. os.date("%H:%M:%S") .. "] " .. tostring(msg)
-    -- Flush every 10 lines
-    if #logBuf >= 10 then
-        pcall(function()
-            local f = io.open(LOADER_LOG, "a")
-            if f then
-                f:write(table.concat(logBuf, "\n") .. "\n")
-                f:close()
-            end
-        end)
-        logBuf = {}
-    end
-end
-
-local function flushLog()
-    if #logBuf == 0 then return end
+-- ============ POPUP ============
+local function POPUP(title, msg)
     pcall(function()
-        local f = io.open(LOADER_LOG, "a")
-        if f then
-            f:write(table.concat(logBuf, "\n") .. "\n")
-            f:close()
-        end
+        local M = package.loaded["client.slua.logic.common.logic_common_msg_box"]
+                    or require("client.slua.logic.common.logic_common_msg_box")
+        if M and M.Show then M.Show(4, tostring(title), tostring(msg)) end
     end)
-    logBuf = {}
 end
 
--- ─── SCAN FOLDER ───────────────────────────────────────────────────
--- Lua io doesn't have listdir. We use a trick with popen if available.
-local function listDir(path)
+-- ============ FILE LIST ============
+local function listModFiles()
     local files = {}
-    -- Try popen (works on some builds)
+    -- Method A: io.popen ls (best case)
     pcall(function()
-        local pipe = io.popen('ls "' .. path .. '" 2>/dev/null')
-        if pipe then
-            for line in pipe:lines() do
-                if line and line ~= "" then
-                    files[#files + 1] = line
+        local p = io.popen("ls " .. CFG.MODS_DIR .. " 2>/dev/null")
+        if p then
+            for line in p:lines() do
+                if line:match("%.lua$") and line:sub(1,1) ~= "." then
+                    files[#files+1] = CFG.MODS_DIR .. line
                 end
             end
-            pipe:close()
+            p:close()
         end
     end)
     return files
 end
 
--- ─── LOAD SINGLE FILE ──────────────────────────────────────────────
-local function loadFile(filepath)
-    local f = io.open(filepath, "r")
-    if not f then return false, "cannot open" end
-    local content = f:read("*a")
+-- ============ SIMPLE HASH (size + byte-sum + head/tail) ============
+local function fileHash(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local data = f:read("*a") or ""
     f:close()
-    if not content or content == "" then return false, "empty file" end
-
-    local chunk, err = loadstring(content, "@" .. filepath)
-    if not chunk then
-        return false, "compile error: " .. tostring(err)
+    if #data == 0 then return "empty" end
+    local sum = 0
+    for i = 1, math.min(#data, 4096) do
+        sum = (sum + data:byte(i)) % 1000000007
     end
-
-    local ok, runErr = pcall(chunk)
-    if not ok then
-        return false, "runtime error: " .. tostring(runErr)
-    end
-    return true, "ok"
+    local head = data:sub(1, 32)
+    local tail = data:sub(-32)
+    return string.format("%d|%d|%s|%s", #data, sum, head, tail)
 end
 
--- ─── LOAD ALL MODS ─────────────────────────────────────────────────
-local function loadAllMods()
-    L("════════════════════════════════════════════════")
-    L("LOADER START — " .. os.date("%Y-%m-%d %H:%M:%S"))
-    L("MOD DIR: " .. MOD_DIR)
-    L("════════════════════════════════════════════════")
+-- ============ LOAD ONE FILE ============
+local function execFile(path)
+    local f = io.open(path, "r")
+    if not f then return false, "open failed" end
+    local src = f:read("*a") or ""
+    f:close()
+    if #src == 0 then return false, "empty" end
+    if #src > CFG.MAX_FILE_SIZE then return false, "too big" end
+    -- strip UTF-8 BOM
+    src = src:gsub("^\239\187\191", "")
+    -- build loader fn
+    local fn, err
+    if loadstring then
+        fn, err = loadstring(src, "@" .. path)
+    elseif load then
+        fn, err = load(src, "@" .. path, "t")
+    end
+    if not fn then return false, "compile: " .. tostring(err) end
+    local ok, res = pcall(fn)
+    if not ok then return false, "run: " .. tostring(res) end
+    return true, res
+end
 
-    local files = listDir(MOD_DIR)
-    L("Scanned: " .. #files .. " entries")
+-- ============ STATE ============
+local fileState = {}   -- [path] = hash
+local loadCount, failCount = 0, 0
+local log = {}
 
-    local loaded, failed = 0, 0
-    local i
-    for i = 1, #files do
-        local name = files[i]
-        -- Only .lua files
-        if name:sub(-4):lower() == ".lua" then
-            local fullpath = MOD_DIR .. name
-            L("")
-            L("→ Loading: " .. name)
-            local ok, err = loadFile(fullpath)
+local function logLine(msg)
+    log[#log+1] = string.format("[%s] %s", os.date("%H:%M:%S"), msg)
+    -- also write to a log file
+    pcall(function()
+        local f = io.open(CFG.MODS_DIR .. "hotload.log", "a")
+        if f then f:write(log[#log] .. "\n"); f:close() end
+    end)
+end
+
+local function scanOnce()
+    local files = listModFiles()
+    for _, path in ipairs(files) do
+        local h = fileHash(path)
+        if h and fileState[path] ~= h then
+            fileState[path] = h
+            local name = path:match("([^/]+)$") or path
+            local ok, err = execFile(path)
             if ok then
-                loaded = loaded + 1
-                L("  ✅ SUCCESS")
+                loadCount = loadCount + 1
+                logLine("LOADED " .. name)
+                if CFG.POPUP then POPUP("HOTLOAD", "Loaded: " .. name) end
             else
-                failed = failed + 1
-                L("  ❌ FAIL: " .. err)
+                failCount = failCount + 1
+                logLine("FAILED " .. name .. " — " .. tostring(err))
+                if CFG.POPUP then POPUP("HOTLOAD FAIL", name .. "\n" .. tostring(err)) end
             end
         end
     end
-
-    L("")
-    L("════════════════════════════════════════════════")
-    L("RESULT: " .. loaded .. " loaded, " .. failed .. " failed")
-    L("════════════════════════════════════════════════")
-    flushLog()
-
-    print("[ModLoader] " .. loaded .. " mods loaded, " .. failed .. " failed")
-    print("[ModLoader] log: " .. LOADER_LOG)
 end
 
--- ─── BOOT ──────────────────────────────────────────────────────────
-pcall(function()
-    local t = require("common.time_ticker")
-    if t and t.AddTimerOnce then
-        t.AddTimerOnce(2.0, loadAllMods)
-    else
-        loadAllMods()
+-- ============ INITIAL SCAN (catches existing files) ============
+logLine("=== hotload boot ===")
+scanOnce()
+logLine(string.format("initial: loaded=%d fail=%d", loadCount, failCount))
+
+-- ============ TICKER LOOP ============
+local function safeReq(...)
+    for _, p in ipairs({...}) do
+        local ok, m = pcall(require, p)
+        if ok and m then return m end
     end
-end)
+    return nil
+end
 
--- Auto-flush log every 5s
-pcall(function()
-    local t = require("common.time_ticker")
-    if t and t.AddTimerLoop then
-        t.AddTimerLoop(0, flushLog, -1, 5.0)
-    end
-end)
+local ticker = safeReq("common.time_ticker")
+if not ticker or not ticker.AddTimerLoop then
+    logLine("FATAL: no time_ticker")
+    if CFG.POPUP then POPUP("HOTLOAD", "No time_ticker") end
+    return
+end
 
-print("[ModLoader] armed — mod dir: " .. MOD_DIR)
-print("[ModLoader] drop .lua files there, restart, they auto-load")
+ticker.AddTimerLoop(0, function()
+    pcall(scanOnce)
+end, -1, CFG.SCAN_INTERVAL)
 
-return _G._ModLoader_Loaded
+logLine("=== hotload active ===")
+
+-- ============ PUBLIC API ============
+_G.HotloadStatus = function()
+    local msg = string.format("loaded=%d fail=%d\nfiles=%d\nwatch=%s",
+        loadCount, failCount,
+        (function() local n=0 for _ in pairs(fileState) do n=n+1 end return n end)(),
+        CFG.MODS_DIR)
+    POPUP("HOTLOAD", msg)
+end
+
+_G.HotloadRescan = function()
+    fileState = {}   -- clear so all files reload
+    scanOnce()
+    POPUP("HOTLOAD", "Rescan: loaded=" .. loadCount)
+end
+
+_G.HotloadWatch = function()  -- force a fresh single file
+    scanOnce()
+end
